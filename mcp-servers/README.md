@@ -73,6 +73,12 @@ The focused metadata check is:
 python3 scripts/check_mcp_catalog.py
 ```
 
+Run `make audit-mcps` for the separate registry-backed dependency security check.
+It uses the committed lockfiles without installing packages or changing them,
+but requires network access and reflects the registry's current advisories.
+The dependency-audit workflow runs weekly, on demand, and for dependency changes;
+the deterministic `make check` gate remains independent of registry availability.
+
 Keep `node_modules/`, credentials, generated requests/responses, logs, and MCP
 runtime state out of version control. Runtime state and user-specific client
 configuration belong outside this repository; commit only reviewed examples or

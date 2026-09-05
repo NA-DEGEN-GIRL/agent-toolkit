@@ -8,7 +8,10 @@ import subprocess
 import sys
 import tempfile
 import importlib.util
+import contextlib
+import io
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("install_skill.py")
@@ -279,6 +282,316 @@ def test_doctor_handles_invalid_utf8() -> None:
         check("Traceback" not in result.stderr, "doctor crashed on invalid UTF-8")
 
 
+def installer_args(installer, home: Path, command: str = "install"):
+    arguments = [command, "--agent", "codex", "--skill", "distill-ramble", "--agent-home", str(home), "--apply"]
+    if command == "install":
+        arguments.append("--skip-validation")
+    return installer.build_parser().parse_args(arguments)
+
+
+def assert_original_and_no_stage(home: Path) -> None:
+    dest = home / "skills" / "distill-ramble"
+    check((dest / "original.txt").read_text() == "original\n", "interruption lost the old destination")
+    check(sorted(path.name for path in dest.iterdir()) == ["original.txt"], "recovery altered the old destination")
+    check(not list((home / "skills").glob(".*.install-*")), "interruption left discoverable staging content")
+
+
+def test_install_interruption_recovery() -> None:
+    """Inject cancellation before/after live moves, not just ordinary failures."""
+    for phase in ("copy", "staged-verify", "metadata", "backup-before", "backup-after", "publish-before", "publish-after", "installed-verify"):
+        for cancellation in (KeyboardInterrupt, SystemExit):
+            installer = load_installer_module()
+            with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+                home = Path(raw) / "codex"
+                dest = home / "skills" / "distill-ramble"
+                dest.mkdir(parents=True)
+                (dest / "original.txt").write_text("original\n")
+                args = installer_args(installer, home)
+                original_copy = installer.shutil.copytree
+                original_move = installer.shutil.move
+                original_replace = installer.os.replace
+                original_verify = installer.verify_installed
+                original_write = Path.write_text
+
+                def copy(source, target, *positional, **kwargs):
+                    check((dest / "original.txt").is_file(), "old skill was removed before staging")
+                    result = original_copy(source, target, *positional, **kwargs)
+                    if phase == "copy":
+                        raise cancellation("injected copy interruption")
+                    return result
+
+                def move(source, target, *positional, **kwargs):
+                    live_backup = Path(source) == dest
+                    if live_backup and phase == "backup-before":
+                        raise cancellation("injected backup interruption")
+                    result = original_move(source, target, *positional, **kwargs)
+                    if live_backup and phase == "backup-after":
+                        raise cancellation("injected post-backup interruption")
+                    return result
+
+                def replace(source, target):
+                    if phase == "publish-before":
+                        raise cancellation("injected publish interruption")
+                    result = original_replace(source, target)
+                    if phase == "publish-after":
+                        raise cancellation("injected post-publish interruption")
+                    return result
+
+                def verify(target, source, name):
+                    if (phase == "staged-verify" and target != dest) or (phase == "installed-verify" and target == dest):
+                        raise cancellation("injected verify interruption")
+                    return original_verify(target, source, name)
+
+                def write(path, *positional, **kwargs):
+                    if phase == "metadata" and path.name == "metadata.json":
+                        raise cancellation("injected metadata interruption")
+                    return original_write(path, *positional, **kwargs)
+
+                with mock.patch.object(installer.shutil, "copytree", side_effect=copy), mock.patch.object(installer.shutil, "move", side_effect=move), mock.patch.object(installer.os, "replace", side_effect=replace), mock.patch.object(installer, "verify_installed", side_effect=verify), mock.patch.object(Path, "write_text", new=write):
+                    try:
+                        installer.install(args)
+                    except cancellation:
+                        pass
+                    else:
+                        raise AssertionError(f"{phase} did not propagate {cancellation.__name__}")
+                assert_original_and_no_stage(home)
+                lock = installer.operation_lock_path(home / "skills", "distill-ramble")
+                handle = installer.acquire_operation_lock(lock)
+                installer.release_operation_lock(handle)
+
+
+def test_failed_staging_validation_preserves_live_install() -> None:
+    installer = load_installer_module()
+    with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+        home = Path(raw) / "codex"
+        dest = home / "skills" / "distill-ramble"
+        dest.mkdir(parents=True)
+        (dest / "original.txt").write_text("original\n")
+        with mock.patch.object(installer, "verify_installed", side_effect=installer.InstallError("staged validation failure")), mock.patch.object(installer, "backup_existing") as backup:
+            try:
+                installer.install(installer_args(installer, home))
+            except installer.InstallError:
+                pass
+            else:
+                raise AssertionError("staged verification failure was ignored")
+            backup.assert_not_called()
+        assert_original_and_no_stage(home)
+
+
+def test_new_install_cancellation_removes_published_entry() -> None:
+    installer = load_installer_module()
+    with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+        home = Path(raw) / "codex"
+        replace = installer.os.replace
+
+        def interrupted_replace(source, dest):
+            replace(source, dest)
+            raise KeyboardInterrupt("after successful publish")
+
+        with mock.patch.object(installer.os, "replace", side_effect=interrupted_replace):
+            try:
+                installer.install(installer_args(installer, home))
+            except KeyboardInterrupt:
+                pass
+            else:
+                raise AssertionError("cancellation was not propagated")
+        check(not (home / "skills" / "distill-ramble").exists(), "cancelled new install left a live entry")
+        check(not list((home / "skills").glob(".*.install-*")), "cancelled new install leaked staging")
+
+
+def test_recovery_does_not_delete_external_replacement() -> None:
+    installer = load_installer_module()
+    with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+        home = Path(raw) / "codex"
+        dest = home / "skills" / "distill-ramble"
+        dest.mkdir(parents=True)
+        (dest / "original.txt").write_text("original\n")
+        verify = installer.verify_installed
+
+        def externally_replaced(target, source, name):
+            if target == dest:
+                # Move aside instead of deleting, so the replacement cannot
+                # immediately reuse the just-freed inode in this fixture.
+                target.rename(home / "external-moved-install")
+                target.mkdir()
+                (target / "external.txt").write_text("external\n")
+                raise KeyboardInterrupt("external writer interrupted validation")
+            return verify(target, source, name)
+
+        with mock.patch.object(installer, "verify_installed", side_effect=externally_replaced):
+            try:
+                installer.install(installer_args(installer, home))
+            except installer.InstallError as exc:
+                check("backup preserved" in str(exc), "external replacement recovery is not actionable")
+            else:
+                raise AssertionError("external replacement must require manual recovery")
+        check((dest / "external.txt").read_text() == "external\n", "recovery deleted another writer's entry")
+        backups = list((home / "skill-backups" / "distill-ramble").glob("*/payload/original.txt"))
+        check(len(backups) == 1 and backups[0].read_text() == "original\n", "old install backup was not preserved")
+
+
+def test_rollback_interruption_recovers_both_entries() -> None:
+    for phase in ("backup-before", "backup-after", "restore-before", "restore-after"):
+        for cancellation in (KeyboardInterrupt, SystemExit):
+            installer = load_installer_module()
+            with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+                home = Path(raw) / "codex"
+                dest = home / "skills" / "distill-ramble"
+                dest.mkdir(parents=True)
+                (dest / "prior.txt").write_text("prior\n")
+                installer.install(installer_args(installer, home))
+                (dest / "current.txt").write_text("current\n")
+                base = home / "skill-backups" / "distill-ramble"
+                selected = next(base.glob("*/payload"))
+                move = installer.shutil.move
+                injected = False
+
+                def interrupted_move(source, target, *positional, **kwargs):
+                    nonlocal injected
+                    operation = "backup" if Path(source) == dest else "restore" if Path(source) == selected else "recovery"
+                    should_interrupt = not injected and phase.startswith(operation + "-")
+                    if should_interrupt and phase.endswith("before"):
+                        injected = True
+                        raise cancellation("injected rollback interruption")
+                    result = move(source, target, *positional, **kwargs)
+                    if should_interrupt and phase.endswith("after"):
+                        injected = True
+                        raise cancellation("injected post-move rollback interruption")
+                    return result
+
+                with mock.patch.object(installer.shutil, "move", side_effect=interrupted_move):
+                    try:
+                        installer.rollback(installer_args(installer, home, "rollback"))
+                    except cancellation:
+                        pass
+                    else:
+                        raise AssertionError(f"{phase} did not propagate cancellation")
+                check((dest / "current.txt").read_text() == "current\n", "rollback cancellation lost current install")
+                check((selected / "prior.txt").read_text() == "prior\n", "rollback cancellation consumed selected backup")
+
+
+def test_sigterm_during_copy_preserves_live_install() -> None:
+    if os.name != "posix":
+        return
+    with tempfile.TemporaryDirectory() as raw:
+        home = Path(raw) / "codex"
+        dest = home / "skills" / "distill-ramble"
+        dest.mkdir(parents=True)
+        (dest / "original.txt").write_text("original\n")
+        code = f"""
+import importlib.util, os, signal, sys
+spec = importlib.util.spec_from_file_location('installer', {str(SCRIPT)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_copy = module.shutil.copytree
+def terminate_copy(source, target, *positional, **kwargs):
+    original_copy(source, target, *positional, **kwargs)
+    os.kill(os.getpid(), signal.SIGTERM)
+module.shutil.copytree = terminate_copy
+sys.argv = ['install_skill.py', 'install', '--agent', 'codex', '--skill', 'distill-ramble', '--agent-home', {str(home)!r}, '--apply', '--skip-validation']
+raise SystemExit(module.main())
+"""
+        result = subprocess.run([sys.executable, "-c", code], text=True, capture_output=True, timeout=20, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        check(result.returncode == 143, f"SIGTERM was not handled: {result.stderr}")
+        check("Cancelled" in result.stderr and "Traceback" not in result.stderr, "SIGTERM did not report clean cancellation")
+        assert_original_and_no_stage(home)
+
+
+def test_backup_allocation_collision_preserves_other_record() -> None:
+    installer = load_installer_module()
+    with tempfile.TemporaryDirectory() as raw:
+        root = Path(raw)
+        dest = root / "skills" / "demo"
+        dest.mkdir(parents=True)
+        (dest / "original.txt").write_text("original\n")
+        backup_base = root / "backups" / "demo"
+        record = backup_base / "20260905000000"
+        record.mkdir(parents=True)
+        (record / "sentinel.txt").write_text("other record\n")
+        with mock.patch.object(installer, "unique_backup_dir", return_value=record):
+            try:
+                installer.backup_existing(dest, backup_base)
+            except FileExistsError:
+                pass
+            else:
+                raise AssertionError("backup allocation collision should fail")
+        check((record / "sentinel.txt").read_text() == "other record\n", "collision deleted another backup record")
+        check((dest / "original.txt").read_text() == "original\n", "collision changed live install")
+
+
+def test_helper_return_and_caller_opcode_cancellation() -> None:
+    """Recovery must not depend on receiving/storing a helper's return value."""
+    cases = (
+        ("install", "stage_package"),
+        ("install", "backup_existing"),
+        ("rollback", "backup_existing"),
+    )
+    for command, helper_name in cases:
+        for boundary in ("helper-return", "caller-post-call"):
+            for cancellation in (KeyboardInterrupt, SystemExit):
+                installer = load_installer_module()
+                with tempfile.TemporaryDirectory() as raw, contextlib.redirect_stdout(io.StringIO()):
+                    home = Path(raw) / "codex"
+                    dest = home / "skills" / "distill-ramble"
+                    dest.mkdir(parents=True)
+                    (dest / "original.txt").write_text("original\n")
+                    selected = None
+                    if command == "rollback":
+                        installer.install(installer_args(installer, home))
+                        (dest / "current.txt").write_text("current\n")
+                        selected = next((home / "skill-backups" / "distill-ramble").glob("*/payload"))
+                    helper_code = getattr(installer, helper_name).__code__
+                    caller_code = getattr(installer, command).__code__
+                    caller_frame = None
+                    injected = False
+
+                    def trace(frame, event, value):
+                        nonlocal caller_frame, injected
+                        if frame.f_code is caller_code and event == "call" and boundary == "caller-post-call":
+                            frame.f_trace_opcodes = True
+                        if frame.f_code is helper_code and event == "return" and value is not None:
+                            # A return trace fires after helper mutations but
+                            # before the return value reaches the caller.
+                            if boundary == "helper-return":
+                                injected = True
+                                raise cancellation("injected helper return boundary")
+                            caller_frame = frame.f_back
+                            check(caller_frame is not None and caller_frame.f_code is caller_code, "unexpected helper caller")
+                            caller_frame.f_trace_opcodes = True
+                        elif boundary == "caller-post-call" and frame is caller_frame and event == "opcode":
+                            # Stop at the very next caller opcode, before
+                            # STORE_FAST / UNPACK_SEQUENCE / POP_TOP can run.
+                            injected = True
+                            raise cancellation("injected caller post-call boundary")
+                        return trace
+
+                    previous_trace = sys.gettrace()
+                    test_frame = sys._getframe()
+                    previous_opcodes = test_frame.f_trace_opcodes
+                    try:
+                        # Python 3.12 activates opcode tracing globally only
+                        # when a current frame has opted in before settrace.
+                        test_frame.f_trace_opcodes = True
+                        sys.settrace(trace)
+                        try:
+                            getattr(installer, command)(installer_args(installer, home, command))
+                        except cancellation:
+                            pass
+                        else:
+                            raise AssertionError(f"{command}/{helper_name}/{boundary} did not propagate cancellation")
+                    finally:
+                        sys.settrace(previous_trace)
+                        test_frame.f_trace_opcodes = previous_opcodes
+                    check(injected, f"{command}/{helper_name}/{boundary} trace hook never fired")
+                    if command == "install":
+                        assert_original_and_no_stage(home)
+                    else:
+                        check((dest / "current.txt").read_text() == "current\n", "return-boundary cancellation lost current install")
+                        check(selected is not None and (selected / "original.txt").read_text() == "original\n", "return-boundary cancellation consumed selected backup")
+                    handle = installer.acquire_operation_lock(installer.operation_lock_path(home / "skills", "distill-ramble"))
+                    installer.release_operation_lock(handle)
+
+
 def main() -> int:
     test_copy_backup_doctor_and_rollback()
     test_symlink_replaces_directory_instead_of_nesting()
@@ -290,6 +603,14 @@ def main() -> int:
     test_operation_lock_rejects_concurrent_mutation()
     test_operation_lock_symlink_is_rejected()
     test_doctor_handles_invalid_utf8()
+    test_install_interruption_recovery()
+    test_failed_staging_validation_preserves_live_install()
+    test_new_install_cancellation_removes_published_entry()
+    test_recovery_does_not_delete_external_replacement()
+    test_rollback_interruption_recovers_both_entries()
+    test_sigterm_during_copy_preserves_live_install()
+    test_backup_allocation_collision_preserves_other_record()
+    test_helper_return_and_caller_opcode_cancellation()
     print("install_skill.py smoke tests passed")
     return 0
 

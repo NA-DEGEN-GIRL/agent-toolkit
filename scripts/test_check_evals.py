@@ -57,6 +57,15 @@ def main() -> int:
             raise AssertionError(f"malformed eval should fail cleanly: {result.stdout}\n{result.stderr}")
         if "Traceback" in result.stderr:
             raise AssertionError(f"malformed eval crashed: {result.stderr}")
+        for document in ([], None, "not an object"):
+            scenarios.write_text(json.dumps(document), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--scenarios", str(scenarios), "--catalog", str(catalog)],
+                text=True, capture_output=True, check=False,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            )
+            if result.returncode != 1 or "Traceback" in result.stderr:
+                raise AssertionError("top-level malformed eval must fail without traceback")
     print("check_evals.py malformed-input test passed")
     return 0
 

@@ -9,7 +9,7 @@ Prerequisite: install the matching skill from this repo, then restart/open a fre
 Most common use: **same LLM, clean context**. Save before `/clear`, then resume in a fresh session of the same agent. This prevents long-chat/context pollution while preserving the useful working state. Cross-agent transfer is optional.
 
 - **Save Mode**: before `/clear`, context reset, periodic context cleanup, or agent switch. The canonical save helper produces an exclusive dated backup; an existing `latest.md` is updated only with its expected SHA-256 and an atomic exchange primitive.
-- **Resume Mode**: after `/clear`, in a fresh same-agent session, or in another compatible agent. The canonical selector validates `latest.md`, falls back to same-lane backups when needed, and returns one exact path to read before repo verification.
+- **Resume Mode**: after `/clear`, in a fresh same-agent session, or in another compatible agent. The canonical selector validates `latest.md`, falls back to same-lane backups when needed, and can emit the already-validated snapshot with `--content` before repo verification; display paths are not machine paths.
 
 Generated files live in the target project:
 
@@ -86,10 +86,10 @@ use codex-handoff
 
 Expected behavior:
 
-1. Select a validated file with `select_snapshot.py` (`latest.md` first, then newest valid same-lane backup).
+1. Read validated content with `select_snapshot.py --content` (`latest.md` first, then newest valid same-lane backup), without reopening a redacted display path.
 2. Read repo instruction files such as `CODEX.md`, `AGENTS.md`, `CLAUDE.md` if present.
 3. Run the safe state probe.
-4. Open referenced files before editing.
+4. Open only relevant, non-sensitive, real regular referenced files physically inside the repo, with no symlink traversal; never infer a missing/redacted path or read credential stores.
 5. Continue only after snapshot/repo mismatch is checked.
 
 ## Claude Code: Save Before `/clear`
@@ -103,7 +103,7 @@ Codex가 이어받을 수 있게 현재 상태와 다음 액션을 .handoff/late
 Expected writer and backup:
 
 ```bash
-python3 ~/.claude/skills/claude-handoff/scripts/save_snapshot.py --root . --agent claude --expect-no-latest < snapshot-draft.md
+python3 -B ~/.claude/skills/claude-handoff/scripts/save_snapshot.py --root . --agent claude --expect-no-latest < snapshot-draft.md
 # creates .handoff/YYYY-MM-DD-HHMMSS-claude.md and, on full success, latest.md
 # for an existing latest, replace --expect-no-latest with --expected-latest-sha256 <selected-hash>
 ```
@@ -200,45 +200,49 @@ These are mostly for debugging or review. The skill normally decides when to run
 ### Safe state probe
 
 ```bash
-python3 ~/.codex/skills/codex-handoff/scripts/handoff_snapshot.py --root .
-python3 ~/.claude/skills/claude-handoff/scripts/handoff_snapshot.py --root .
+python3 -B ~/.codex/skills/codex-handoff/scripts/handoff_snapshot.py --root .
+python3 -B ~/.claude/skills/claude-handoff/scripts/handoff_snapshot.py --root .
 ```
+
+The probe never hashes working files: it compares index/stat metadata conservatively and omits line-count diff stats. Clean/process filters do not execute, but worktree dirty state therefore remains `unknown`; stat hints are not exact `git status` results.
 
 ### Validate snapshot before reading
 
 ```bash
-python3 ~/.codex/skills/codex-handoff/scripts/validate_snapshot.py .handoff/latest.md --root .
+python3 -B ~/.codex/skills/codex-handoff/scripts/validate_snapshot.py .handoff/latest.md --root .
 # scoped diagnostic:
-python3 ~/.codex/skills/codex-handoff/scripts/validate_snapshot.py .handoff/scopes/auth-refactor/latest.md --root . --scope auth-refactor
+python3 -B ~/.codex/skills/codex-handoff/scripts/validate_snapshot.py .handoff/scopes/auth-refactor/latest.md --root . --scope auth-refactor
 ```
 
 ### List and select lanes
 
 ```bash
-python3 ~/.codex/skills/codex-handoff/scripts/list_lanes.py --root .
-python3 ~/.codex/skills/codex-handoff/scripts/select_snapshot.py --root .
-python3 ~/.codex/skills/codex-handoff/scripts/select_snapshot.py --root . --scope auth-refactor
+python3 -B ~/.codex/skills/codex-handoff/scripts/list_lanes.py --root .
+python3 -B ~/.codex/skills/codex-handoff/scripts/select_snapshot.py --root . --content
+python3 -B ~/.codex/skills/codex-handoff/scripts/select_snapshot.py --root . --scope auth-refactor --content
 ```
 
 `list_lanes.py` includes safe backup-only/orphan lanes. `select_snapshot.py` always prefers a valid `latest.md`; only when that is missing or invalid does it try valid timestamped backups newest-first in the selected lane.
 
+`--content` reads the already-validated bytes with best-effort disclosure redaction and preserved Markdown. Do not reconstruct masked references. Default path labels are redacted display only; `--path-only` is exact machine output for local capture, not user-facing logs. This distinction matters even for valid scopes such as `secrets` or long slugs.
+
 ### Canonical save helper
 
 ```bash
-python3 ~/.codex/skills/codex-handoff/scripts/save_snapshot.py --root . --agent codex --expect-no-latest < snapshot-draft.md
+python3 -B ~/.codex/skills/codex-handoff/scripts/save_snapshot.py --root . --agent codex --expect-no-latest < snapshot-draft.md
 # scoped save; when replacing inspected latest, pass its reported SHA-256:
-python3 ~/.codex/skills/codex-handoff/scripts/save_snapshot.py --root . --agent codex --scope auth-refactor --expected-latest-sha256 "$EXPECTED_SHA256" < snapshot-draft.md
+python3 -B ~/.codex/skills/codex-handoff/scripts/save_snapshot.py --root . --agent codex --scope auth-refactor --expected-latest-sha256 "$EXPECTED_SHA256" < snapshot-draft.md
 ```
 
 ### Prune old backups
 
 ```bash
-python3 ~/.codex/skills/codex-handoff/scripts/prune_backups.py --root . --dir .handoff --agent codex --keep 20
-python3 ~/.claude/skills/claude-handoff/scripts/prune_backups.py --root . --dir .handoff --agent claude --keep 20
+python3 -B ~/.codex/skills/codex-handoff/scripts/prune_backups.py --root . --dir .handoff --agent codex --keep 20
+python3 -B ~/.claude/skills/claude-handoff/scripts/prune_backups.py --root . --dir .handoff --agent claude --keep 20
 
 # one scoped lane, or every lane (default + scopes) at once:
-python3 ~/.codex/skills/codex-handoff/scripts/prune_backups.py --root . --dir .handoff --scope auth-refactor --agent codex --keep 20
-python3 ~/.codex/skills/codex-handoff/scripts/prune_backups.py --root . --dir .handoff --all-lanes --agent codex --keep 20
+python3 -B ~/.codex/skills/codex-handoff/scripts/prune_backups.py --root . --dir .handoff --scope auth-refactor --agent codex --keep 20
+python3 -B ~/.codex/skills/codex-handoff/scripts/prune_backups.py --root . --dir .handoff --all-lanes --agent codex --keep 20
 ```
 
 ## Good Prompts

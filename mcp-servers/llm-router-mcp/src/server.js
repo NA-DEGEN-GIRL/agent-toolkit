@@ -82,7 +82,7 @@ export async function main() {
         provider: providerSchema.optional()
       }
     },
-    async (args) => jsonContent(await doctorProviders(args))
+    async (args, extra) => jsonContent(await doctorProviders({ ...args, signal: extra.signal }))
   );
 
   server.registerTool(
@@ -101,7 +101,7 @@ export async function main() {
           .describe("Optional .md filename. Path components are ignored.")
       }
     },
-    async (args) => jsonContent(await writeInputFile(args))
+    async (args, extra) => jsonContent(await writeInputFile({ ...args, signal: extra.signal }))
   );
 
   server.registerTool(
@@ -124,7 +124,7 @@ export async function main() {
         rows: dimensionSchema
       }
     },
-    async (args) => jsonContent(await ensureSession(guardCwdOverride(args)))
+    async (args, extra) => jsonContent(await ensureSession({ ...guardCwdOverride(args), signal: extra.signal }))
   );
 
   server.registerTool(
@@ -148,7 +148,7 @@ export async function main() {
         rows: dimensionSchema
       }
     },
-    async (args) => jsonContent(await sendInput(guardCwdOverride(args)))
+    async (args, extra) => jsonContent(await sendInput({ ...guardCwdOverride(args), signal: extra.signal }))
   );
 
   server.registerTool(
@@ -166,7 +166,7 @@ export async function main() {
         captureLines: captureLinesSchema
       }
     },
-    async (args) => jsonContent(await waitForStart(args))
+    async (args, extra) => jsonContent(await waitForStart({ ...args, signal: extra.signal }))
   );
 
   server.registerTool(
@@ -184,7 +184,7 @@ export async function main() {
         captureLines: captureLinesSchema
       }
     },
-    async (args) => jsonContent(await waitForResponse(args))
+    async (args, extra) => jsonContent(await waitForResponse({ ...args, signal: extra.signal }))
   );
 
   server.registerTool(
@@ -210,7 +210,7 @@ export async function main() {
         rows: dimensionSchema
       }
     },
-    async (args) => jsonContent(await tmuxAsk(guardCwdOverride(args)))
+    async (args, extra) => jsonContent(await tmuxAsk({ ...guardCwdOverride(args), signal: extra.signal }))
   );
 
   server.registerTool(
@@ -241,13 +241,13 @@ export async function main() {
         timeoutMs: optionalCommon.timeoutMs
       }
     },
-    async (args) => {
+    async (args, extra) => {
       const hasMarkdown = typeof args.markdown === "string" && args.markdown.length > 0;
       const hasInputPath = typeof args.inputPath === "string" && args.inputPath.length > 0;
       if (hasMarkdown === hasInputPath) {
         throw new Error("exactly one of markdown or inputPath is required");
       }
-      return jsonContent(await headlessAsk(guardCwdOverride(args)));
+      return jsonContent(await headlessAsk({ ...guardCwdOverride(args), signal: extra.signal }));
     }
   );
 
@@ -262,7 +262,7 @@ export async function main() {
         sessionName: optionalCommon.sessionName
       }
     },
-    async (args) => jsonContent(await killSession({ ...args, requireOwned: true }))
+    async (args, extra) => jsonContent(await killSession({ ...args, requireOwned: true, signal: extra.signal }))
   );
 
   server.registerTool(
@@ -280,7 +280,7 @@ export async function main() {
         lines: captureLinesSchema
       }
     },
-    async (args) => jsonContent(await status(args))
+    async (args, extra) => jsonContent(await status({ ...args, signal: extra.signal }))
   );
 
   server.registerTool(
@@ -294,14 +294,14 @@ export async function main() {
         lines: captureLinesSchema
       }
     },
-    async (args) => {
+    async (args, extra) => {
       if (process.env.LLM_ROUTER_MCP_ENABLE_DEBUG_TOOLS !== "1") {
         throw new Error(
           "raw pane capture is disabled; set LLM_ROUTER_MCP_ENABLE_DEBUG_TOOLS=1 to opt in"
         );
       }
       return jsonContent({
-        paneText: await capturePane({ ...args, requireOwned: true })
+        paneText: await capturePane({ ...args, requireOwned: true, signal: extra.signal })
       });
     }
   );

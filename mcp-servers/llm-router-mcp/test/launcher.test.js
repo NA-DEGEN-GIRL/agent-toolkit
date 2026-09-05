@@ -398,8 +398,10 @@ exec /bin/true --always-approve --permission-mode bypassPermissions "$@"
     modelSource: "request",
     bypassSource: "router+launcher",
     bypassVerified: true,
-    opaqueWrapper: false
+    opaqueWrapper: false,
+    wrapperFingerprints: resolved.wrapperFingerprints
   });
+  assert.equal(resolved.wrapperFingerprints.length, 2);
 });
 
 test("auto mode injects bypass for a raw executable and shares BASE_ARGS across modes", async (t) => {
@@ -545,3 +547,50 @@ async function writeExecutable(filename, contents) {
   await fs.writeFile(filename, contents, { mode: 0o755 });
   await fs.chmod(filename, 0o755);
 }
+
+test("wrapper chains reject opaque targets, script targets, cycles, and hidden models", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-chain-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const outer = path.join(directory, "outer");
+  const inner = path.join(directory, "inner");
+  await writeExecutable(outer, `#!/bin/sh\nexec ${inner} "$@"\n`);
+  const environment = { PATH: directory, LLM_ROUTER_MCP_CLAUDE_EXECUTABLE: outer };
+  for (const source of [
+    "#!/bin/sh\nprintf 'args discarded\\n'\n",
+    "#!/usr/bin/env node\nprocess.exit(0);\n",
+    `#!/bin/sh\nexec ${outer} "$@"\n`,
+    '#!/bin/sh\nexec /bin/true --model hidden "$@"\n'
+  ]) {
+    await writeExecutable(inner, source);
+    await assert.rejects(resolveLauncher("claude", { environment }), /opaque|contains a model flag/);
+  }
+  await writeExecutable(inner, '#!/bin/sh\nexec /bin/true "$@"\n');
+  const before = await resolveLauncher("claude", { environment });
+  assert.equal(before.bypassVerified, true);
+  assert.equal(before.wrapperFingerprints.length, 3);
+  await writeExecutable(inner, '#!/bin/sh\n# updated target wrapper\nexec /bin/true "$@"\n');
+  const after = await resolveLauncher("claude", { environment });
+  assert.notDeepEqual(after.wrapperFingerprints, before.wrapperFingerprints);
+});
+
+test("oversized shell wrapper inspection never trusts a truncated prefix", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-large-wrapper-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const wrapper = path.join(directory, "claude");
+  await writeExecutable(wrapper, '#!/bin/sh\nexec /bin/true "$@"\n' + "#".repeat(70_000) + "\necho hidden\n");
+  await assert.rejects(resolveLauncher("claude", {
+    environment: { PATH: directory, LLM_ROUTER_MCP_CLAUDE_EXECUTABLE: wrapper }
+  }), /opaque/);
+});
+
+test("large default provider CLI scripts remain trusted entrypoints, not verified custom wrappers", async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-default-script-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const cli = path.join(directory, "claude");
+  await writeExecutable(cli, '#!/usr/bin/env node\n//' + "x".repeat(70_000) + "\nprocess.exit(0);\n");
+  const normal = await resolveLauncher("claude", { environment: { PATH: directory } });
+  assert.equal(normal.bypassVerified, true);
+  await assert.rejects(resolveLauncher("claude", {
+    environment: { PATH: directory, LLM_ROUTER_MCP_CLAUDE_EXECUTABLE: cli }
+  }), /explicitly configured script/);
+});

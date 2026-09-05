@@ -2,8 +2,12 @@
 """Validate one in-lane handoff snapshot before loading it into context."""
 from __future__ import annotations
 
-import argparse
 import sys
+
+# Helper invocation must not mutate the installed/source package via imports.
+sys.dont_write_bytecode = True
+
+import argparse
 from pathlib import Path
 
 from snapshot_common import (

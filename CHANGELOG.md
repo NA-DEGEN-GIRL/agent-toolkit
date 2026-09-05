@@ -4,6 +4,20 @@ This file summarizes repository releases. Installable package folders remain foc
 
 ## Unreleased
 
+### Review hardening
+
+- Corrected MCP session-start ownership, subprocess cancellation/timeout cleanup,
+  startup deadline handling, and nested-wrapper verification; added fake-provider regressions.
+- Hardened handoff probing against Git filter execution, concurrent marker writes,
+  and lossy selector paths; clarified snapshot trust and referenced-file boundaries
+  and prevented helper imports from generating package bytecode.
+- Made skill installation cancellation-recoverable and Go formatting examples
+  fail closed, with isolated interruption and executable-example tests.
+- Refreshed vulnerable MCP transitive dependencies and added a separate weekly
+  lockfile audit without adding network access to the canonical check gate.
+- Added inert forward-eval fixtures and assertion-free prompt preparation, kept
+  distinct from deterministic tests and actual behavioral evaluation evidence.
+
 ### Repository structure
 
 - Expanded the repository contract from skills-only packaging to a broader local-agent toolkit while preserving the existing `skills/` layout and installer behavior.

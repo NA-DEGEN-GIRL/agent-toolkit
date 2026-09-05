@@ -1,0 +1,10 @@
+{
+  "files": {
+    "repo/README.md": "# Report Formatter\nUse `just check` for the canonical check-only gate.\n",
+    "repo/justfile": "check: fmt lint typecheck test\n\nfmt:\n    python3 -m ruff format --check .\n\nlint:\n    python3 -m ruff check .\n\ntypecheck:\n    python3 -m mypy src\n\ntest:\n    python3 -m unittest discover -s tests\n",
+    "repo/pyproject.toml": "[project]\nname = \"report-formatter-fixture\"\nversion = \"0.0.0\"\nrequires-python = \">=3.10\"\n",
+    "repo/src/formatter.py": "def format_report(value: str) -> str:\n    return value.strip()\n",
+    "repo/tests/test_formatter.py": "import unittest\nfrom src.formatter import format_report\n\nclass ReportTest(unittest.TestCase):\n    def test_trim(self):\n        self.assertEqual(format_report(\" hello \"), \"hello\")\n"
+  },
+  "symlinks": {}
+}

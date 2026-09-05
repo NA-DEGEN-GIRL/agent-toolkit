@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := all
-.PHONY: all check check-skills setup-mcps check-mcps validate syntax-check test sync-check
+.PHONY: all check check-skills setup-mcps check-mcps audit-mcps validate syntax-check test sync-check
 .NOTPARALLEL: all check check-skills setup-mcps check-mcps
 
 LOCAL_VALIDATOR ?= ./scripts/validate_skill.py
@@ -46,6 +46,14 @@ check-mcps:
 			$(NPM) --prefix "$$mcp_dir" test || exit 1; \
 		done; \
 	fi
+
+# Registry-backed security checks are deliberately separate from make check.
+# This needs network access, but neither installs nor modifies locked packages.
+audit-mcps:
+	@for mcp_dir in $(MCP_NODE_DIRS); do \
+		echo "$(NPM) --prefix $$mcp_dir audit --package-lock-only --ignore-scripts --audit-level=low"; \
+		$(NPM) --prefix "$$mcp_dir" audit --package-lock-only --ignore-scripts --audit-level=low || exit 1; \
+	done
 
 validate:
 	$(ENV) $(PYTHON) $(LOCAL_VALIDATOR) $(SKILL_DIRS)

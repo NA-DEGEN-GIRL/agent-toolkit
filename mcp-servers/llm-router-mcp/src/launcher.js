@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import crypto from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
@@ -165,8 +166,8 @@ export function detectShebangWrapper(provider, source) {
       nonShellScript: true
     };
   }
-  const wrapperArgs = parseStrictExecWrapper(text);
-  if (!wrapperArgs) {
+  const wrapper = parseStrictExecWrapper(text);
+  if (!wrapper) {
     return {
       ...emptyWrapperInspection(),
       inspected: true,
@@ -175,6 +176,7 @@ export function detectShebangWrapper(provider, source) {
     };
   }
 
+  const wrapperArgs = wrapper.args;
   const provided = new Set();
   const conflicts = [];
   const modelOptions = argOptionValues(
@@ -243,7 +245,8 @@ export function detectShebangWrapper(provider, source) {
     provided: [...provided],
     conflicts,
     modelOptions,
-    unsupportedArgs
+    unsupportedArgs,
+    targetExecutable: wrapper.executable
   };
 }
 
@@ -291,7 +294,7 @@ function parseStrictExecWrapper(source) {
   const executable = words[1];
   if (
     /[;|&<>()`]/.test(executable) ||
-    (executable.includes("$") && !/^\$HOME(?:\/|$)/.test(executable)) ||
+    executable.includes("$") ||
     ["env", "command", "sh", "bash"].includes(path.basename(executable))
   ) {
     return null;
@@ -304,7 +307,7 @@ function parseStrictExecWrapper(source) {
   ) {
     return null;
   }
-  return args;
+  return { executable, args };
 }
 
 function parseSimpleShellWords(line) {
@@ -626,36 +629,71 @@ export async function resolveLauncher(provider, options = {}) {
     modelSource,
     bypassSource: normalized.bypassSource,
     bypassVerified: normalized.bypassVerified,
-    opaqueWrapper: Boolean(wrapperInspection.opaqueWrapper)
+    opaqueWrapper: Boolean(wrapperInspection.opaqueWrapper),
+    ...(wrapperInspection.wrapperFingerprints?.length > 1
+      ? { wrapperFingerprints: wrapperInspection.wrapperFingerprints }
+      : {})
   };
 }
 
 export async function inspectExecutableWrapper(provider, executable, options = {}) {
   const environment = options.environment || process.env;
-  const resolvedPath = await resolveExecutablePath(executable, {
-    environment,
-    cwd: options.cwd
-  });
-  if (!resolvedPath) {
-    return emptyWrapperInspection();
+  const visited = new Set();
+  const wrapperFingerprints = [];
+  let combined = null;
+  let current = executable;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const resolvedPath = await resolveExecutablePath(current, { environment, cwd: options.cwd });
+    if (!resolvedPath) {
+      return combined ? { ...combined, opaqueWrapper: true, wrapperFingerprints } : emptyWrapperInspection();
+    }
+    let handle;
+    try {
+      const realPath = await fs.realpath(resolvedPath);
+      if (visited.has(realPath)) return { ...combined, opaqueWrapper: true, wrapperFingerprints };
+      visited.add(realPath);
+      handle = await fs.open(realPath, "r");
+      const stat = await handle.stat();
+      if (!stat.isFile()) throw new Error("launcher is not a regular file");
+      const buffer = Buffer.alloc(MAX_WRAPPER_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      const bytes = buffer.subarray(0, bytesRead);
+      const inspection = detectShebangWrapper(provider, bytes.toString("utf8"));
+      wrapperFingerprints.push({
+        realPath, dev: stat.dev, ino: stat.ino, size: stat.size,
+        mtimeMs: stat.mtimeMs, mode: stat.mode,
+        ...(stat.size <= MAX_WRAPPER_BYTES
+          ? { sha256: crypto.createHash("sha256").update(bytes).digest("hex") }
+          : {})
+      });
+      // Never verify a truncated shell script, or smuggle a custom Node/Python
+      // (or opaque shell) launcher through a one-line outer wrapper. Default
+      // provider CLI entrypoint scripts are trusted only at the top level.
+      if (inspection.shebang && !inspection.nonShellScript && stat.size > MAX_WRAPPER_BYTES) {
+        inspection.opaqueWrapper = true;
+      }
+      if (depth > 0 && inspection.nonShellScript) inspection.opaqueWrapper = true;
+      if (!combined) combined = { ...inspection };
+      else {
+        for (const key of ["provided", "conflicts", "modelOptions", "unsupportedArgs"]) {
+          combined[key] = [...(combined[key] || []), ...(inspection[key] || [])];
+        }
+        combined.opaqueWrapper ||= inspection.opaqueWrapper;
+      }
+      if (combined.opaqueWrapper || !inspection.wrapper) {
+        return { ...combined, wrapperFingerprints };
+      }
+      current = inspection.targetExecutable;
+    } catch {
+      return {
+        ...(combined || emptyWrapperInspection()), inspected: true,
+        inspectionFailed: true, opaqueWrapper: Boolean(combined), wrapperFingerprints
+      };
+    } finally {
+      await handle?.close().catch(() => {});
+    }
   }
-
-  let handle;
-  try {
-    handle = await fs.open(resolvedPath, "r");
-    const buffer = Buffer.alloc(MAX_WRAPPER_BYTES);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    const source = buffer.subarray(0, bytesRead).toString("utf8");
-    return detectShebangWrapper(provider, source);
-  } catch {
-    return {
-      ...emptyWrapperInspection(),
-      inspected: true,
-      inspectionFailed: true
-    };
-  } finally {
-    await handle?.close().catch(() => {});
-  }
+  return { ...combined, opaqueWrapper: true, wrapperFingerprints };
 }
 
 export async function resolveExecutablePath(executable, options = {}) {

@@ -2,11 +2,15 @@
 """Prune real, validly timestamped backups per lane and agent."""
 from __future__ import annotations
 
+import sys
+
+# Helper invocation must not mutate the installed/source package via imports.
+sys.dont_write_bytecode = True
+
 import argparse
 import os
 import secrets
 import stat
-import sys
 from pathlib import Path
 
 from snapshot_common import (

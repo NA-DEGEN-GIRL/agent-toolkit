@@ -2,8 +2,12 @@
 """Deterministically select latest, then newest valid same-lane backup."""
 from __future__ import annotations
 
-import argparse
 import sys
+
+# Helper invocation must not mutate the installed/source package via imports.
+sys.dont_write_bytecode = True
+
+import argparse
 from pathlib import Path
 
 from snapshot_common import (
@@ -11,6 +15,7 @@ from snapshot_common import (
     SnapshotError,
     lane_for,
     path_display,
+    redact_snapshot_content,
     resolve_handoff,
     sanitize_display,
     select_valid_snapshot,
@@ -23,7 +28,9 @@ def main() -> int:
     parser.add_argument("--dir", default=".handoff", help="Handoff directory under root")
     parser.add_argument("--scope", help="Selected scoped lane; omit for the default lane")
     parser.add_argument("--max-bytes", type=int, default=MAX_DEFAULT_BYTES, help="Positive maximum snapshot size")
-    parser.add_argument("--path-only", action="store_true", help="Print only the repo-relative selected path")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--path-only", action="store_true", help="Exact repo-relative machine path; capture locally, do not display sensitive paths")
+    output.add_argument("--content", action="store_true", help="Read already-validated snapshot content with best-effort redaction; no pathname reopen")
     args = parser.parse_args()
 
     try:
@@ -35,18 +42,26 @@ def main() -> int:
         return 2
 
     if snapshot is None or snapshot.path is None:
-        print(f"No valid handoff snapshot in lane {lane.label}.", file=sys.stderr)
+        print(f"No valid handoff snapshot in lane {sanitize_display(lane.label)}.", file=sys.stderr)
         for error in errors:
             print(f"- {sanitize_display(error, 300)}", file=sys.stderr)
         return 1
 
     selected = path_display(snapshot.path, root)
     if args.path_only:
-        print(selected)
+        # This explicit machine channel must never silently change/truncate a
+        # valid pathname. Default user-facing diagnostics remain redacted.
+        print(snapshot.path.relative_to(root).as_posix())
+        return 0
+    if args.content:
+        print(f"SELECTED DISPLAY: {selected}", file=sys.stderr)
+        print(f"- SHA-256 (original validated bytes): {snapshot.sha256}", file=sys.stderr)
+        sys.stdout.write(redact_snapshot_content(snapshot.text))
         return 0
     source = "latest" if snapshot.path.name == "latest.md" else "dated backup"
     print(f"SELECTED: {selected}")
-    print(f"- Lane: {lane.label}")
+    print("- Path display may be redacted; use --content to read safely, not this display as a pathname.")
+    print(f"- Lane: {sanitize_display(lane.label)}")
     print(f"- Source: {source}")
     print(f"- Agent: {sanitize_display(snapshot.metadata.get('Agent', 'Unknown'))}")
     print(f"- Created at: {sanitize_display(snapshot.metadata.get('Created at', 'Unknown'))}")

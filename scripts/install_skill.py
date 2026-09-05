@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -43,6 +44,30 @@ class InstallError(RuntimeError):
     """A user-actionable installer safety or validation error."""
 
 
+class InstallCancelled(BaseException):
+    """A handled termination request; mutation recovery must run first."""
+
+    def __init__(self, signum: int) -> None:
+        self.signum = signum
+        super().__init__(f"cancelled by signal {signum}")
+
+
+class MutationJournal:
+    """Caller-owned recovery paths, registered before helper mutations.
+
+    Returning a path is not a transaction handoff: cancellation can occur on
+    RETURN_VALUE or before the caller stores the result. Both sides therefore
+    share this object throughout preparation, publication, and recovery.
+    """
+
+    def __init__(self) -> None:
+        self.stage: Path | None = None
+        self.stage_identity: tuple[int, int] | None = None
+        self.backup_dir: Path | None = None
+        self.backup_payload: Path | None = None
+        self.backup_created = False
+
+
 def resolved(path: Path) -> Path:
     return path.expanduser().resolve(strict=False)
 
@@ -61,6 +86,14 @@ def is_relative_to(path: Path, parent: Path) -> bool:
 
 def entry_exists(path: Path) -> bool:
     return os.path.lexists(path)
+
+
+def entry_identity(path: Path) -> tuple[int, int] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    return info.st_dev, info.st_ino
 
 
 def entry_type(path: Path) -> str:
@@ -370,16 +403,21 @@ def release_operation_lock(handle: tuple[int, str]) -> None:
         os.close(fd)
 
 
-def backup_existing(dest: Path, backup_base: Path) -> tuple[Path | None, Path | None]:
+def backup_existing(
+    dest: Path, backup_base: Path, *, journal: MutationJournal | None = None,
+) -> tuple[Path | None, Path | None]:
     if not entry_exists(dest):
         return None, None
     assert_safe_directory_chain(backup_base, "per-skill backup directory")
     kind = entry_type(dest)
     backup_dir = unique_backup_dir(backup_base)
-    backup_dir.mkdir(parents=True, exist_ok=False)
     payload = backup_dir / "payload"
+    state = journal if journal is not None else MutationJournal()
+    state.backup_dir = backup_dir
+    state.backup_payload = payload
     try:
-        shutil.move(str(dest), str(payload))
+        backup_dir.mkdir(parents=True, exist_ok=False)
+        state.backup_created = True
         metadata = {
             "schema_version": 1,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -388,9 +426,24 @@ def backup_existing(dest: Path, backup_base: Path) -> tuple[Path | None, Path | 
             "entry_type": kind,
         }
         (backup_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        if payload.exists() or payload.is_symlink():
-            shutil.move(str(payload), str(dest))
+        # Finish all preparation before removing the live destination. Catch
+        # cancellation even when the move completed just before it was raised.
+        shutil.move(str(dest), str(payload))
+    except BaseException as exc:
+        if not state.backup_created:
+            # A colliding record belongs to another operation; never clean it.
+            raise
+        if entry_exists(payload):
+            if entry_exists(dest):
+                raise InstallError(
+                    f"backup was interrupted with both entries present; inspect destination={dest} and backup={payload}"
+                ) from exc
+            try:
+                shutil.move(str(payload), str(dest))
+            except BaseException as recovery_exc:
+                raise InstallError(
+                    f"backup failed and restoration was incomplete; recover manually from {payload}: {recovery_exc}"
+                ) from exc
         shutil.rmtree(backup_dir, ignore_errors=True)
         raise
     return backup_dir, payload
@@ -406,16 +459,23 @@ def remove_entry(path: Path) -> None:
             raise InstallError(f"refusing to remove special filesystem entry: {path}")
 
 
-def stage_package(source: Path, skills_root: Path, name: str, mode: str) -> Path:
+def stage_package(
+    source: Path, skills_root: Path, name: str, mode: str,
+    *, journal: MutationJournal | None = None,
+) -> Path:
     stage = skills_root / f".{name}.install-{os.getpid()}-{timestamp()}"
     if stage.exists() or stage.is_symlink():
         raise InstallError(f"staging path already exists: {stage}")
+    state = journal if journal is not None else MutationJournal()
+    state.stage = stage
     try:
         if mode == "copy":
             shutil.copytree(source, stage, symlinks=True)
+            state.stage_identity = entry_identity(stage)
             validate_source_tree(stage)
         else:
             os.symlink(source, stage, target_is_directory=True)
+            state.stage_identity = entry_identity(stage)
     except BaseException:
         if entry_exists(stage):
             remove_entry(stage)
@@ -501,37 +561,51 @@ def install(args: argparse.Namespace) -> int:
     ensure_safe_directory(backup_base, "per-skill backup directory")
     lock_path = operation_lock_path(skills_root, args.skill)
     ensure_safe_directory(lock_path.parent, "skill lock directory")
-    backup_dir: Path | None = None
-    backup_payload: Path | None = None
-    stage: Path | None = None
-    installed_ours = False
+    state = MutationJournal()
     lock_handle: tuple[int, str] | None = None
     try:
         lock_handle = acquire_operation_lock(lock_path)
         validate_source_tree(source)
-        backup_dir, backup_payload = backup_existing(dest, backup_base)
-        stage = stage_package(source, skills_root, args.skill, args.mode)
-        os.replace(stage, dest)
-        stage = None
-        installed_ours = True
+        # Copy and verify while the old skill remains available. Only the
+        # prepared entry participates in the short backup/publish phase.
+        stage_package(source, skills_root, args.skill, args.mode, journal=state)
+        if state.stage is None:
+            raise InstallError("staging helper did not register its destination")
+        verify_installed(state.stage, source, args.skill)
+        backup_existing(dest, backup_base, journal=state)
+        os.replace(state.stage, dest)
         verify_installed(dest, source, args.skill)
-    except Exception as exc:
-        if stage is not None:
-            remove_entry(stage)
-        if installed_ours:
-            remove_entry(dest)
+    except BaseException as exc:
+        recovery_errors: list[str] = []
+        stage, stage_identity = state.stage, state.stage_identity
+        backup_payload = state.backup_payload if state.backup_created else None
+        if stage is not None and entry_exists(stage):
+            if stage_identity is not None and entry_identity(stage) == stage_identity:
+                try:
+                    remove_entry(stage)
+                except BaseException as recovery_exc:
+                    recovery_errors.append(f"staging cleanup failed at {stage}: {recovery_exc}")
+            else:
+                recovery_errors.append(f"staging identity changed; inspect {stage}")
+        # An interrupt may arrive after os.replace succeeds but before Python
+        # records that fact. Match the staged inode instead of a success flag;
+        # never delete a destination replaced by another writer.
+        if stage_identity is not None and entry_identity(dest) == stage_identity:
+            try:
+                remove_entry(dest)
+            except BaseException as recovery_exc:
+                recovery_errors.append(f"installed entry cleanup failed at {dest}: {recovery_exc}")
         if backup_payload is not None and entry_exists(backup_payload):
             if entry_exists(dest):
-                raise InstallError(
-                    f"install failed, but destination was replaced externally; backup remains at {backup_payload}"
-                ) from exc
-            try:
-                shutil.move(str(backup_payload), str(dest))
-            except Exception as recovery_exc:
-                raise InstallError(
-                    f"install failed and automatic restoration also failed; recover manually from {backup_payload}: {recovery_exc}"
-                ) from exc
-        if isinstance(exc, InstallError):
+                recovery_errors.append(f"destination remains occupied; backup preserved at {backup_payload}")
+            else:
+                try:
+                    shutil.move(str(backup_payload), str(dest))
+                except BaseException as recovery_exc:
+                    recovery_errors.append(f"recover manually from {backup_payload}: {recovery_exc}")
+        if recovery_errors:
+            raise InstallError("install recovery incomplete: " + "; ".join(recovery_errors)) from exc
+        if isinstance(exc, InstallError) or not isinstance(exc, Exception):
             raise
         raise InstallError(f"install failed and rollback was attempted: {exc}") from exc
     finally:
@@ -540,8 +614,8 @@ def install(args: argparse.Namespace) -> int:
 
     print(f"Installed:   {dest}")
     print(f"Version:     {read_version(dest)}")
-    if backup_dir:
-        print(f"Backup:      {backup_dir}")
+    if state.backup_created:
+        print(f"Backup:      {state.backup_dir}")
     else:
         print("Backup:      none (destination did not exist)")
     duplicates = duplicate_locations(skills_root, args.skill, dest)
@@ -695,27 +769,30 @@ def rollback(args: argparse.Namespace) -> int:
     ensure_safe_directory(backup_base, "per-skill backup directory")
     lock_path = operation_lock_path(skills_root, args.skill)
     ensure_safe_directory(lock_path.parent, "skill lock directory")
-    current_backup: Path | None = None
-    current_payload: Path | None = None
-    selected_moved = False
+    state = MutationJournal()
+    selected_identity: tuple[int, int] | None = None
+    restored_identity: tuple[int, int] | None = None
     lock_handle: tuple[int, str] | None = None
     try:
         lock_handle = acquire_operation_lock(lock_path)
         # The record may have changed while the dry-run/report was printed.
         metadata = validate_backup_record(selected_dir, payload, dest=dest, skill=args.skill)
-        current_backup, current_payload = backup_existing(dest, backup_base)
+        selected_identity = entry_identity(payload)
+        backup_existing(dest, backup_base, journal=state)
         shutil.move(str(payload), str(dest))
-        selected_moved = True
+        restored_identity = entry_identity(dest)
         if entry_type(dest) != metadata["entry_type"]:
             raise InstallError("restored destination type does not match backup metadata")
-    except Exception as exc:
-        recovery_error: Exception | None = None
-        if selected_moved and entry_exists(dest):
+    except BaseException as exc:
+        recovery_error: BaseException | None = None
+        current_payload = state.backup_payload if state.backup_created else None
+        dest_identity = entry_identity(dest)
+        if dest_identity is not None and dest_identity in (selected_identity, restored_identity):
             try:
                 shutil.move(str(dest), str(payload))
-            except Exception as move_exc:
+            except BaseException as move_exc:
                 recovery_error = move_exc
-        elif entry_exists(dest):
+        elif current_payload is not None and entry_exists(current_payload) and entry_exists(dest):
             # Do not delete a destination that appeared after the current one
             # was backed up; leave both it and the backup for manual recovery.
             raise InstallError(
@@ -724,14 +801,14 @@ def rollback(args: argparse.Namespace) -> int:
         if recovery_error is None and current_payload is not None and entry_exists(current_payload):
             try:
                 shutil.move(str(current_payload), str(dest))
-            except Exception as move_exc:
+            except BaseException as move_exc:
                 recovery_error = move_exc
         if recovery_error is not None:
             raise InstallError(
                 "rollback and automatic recovery were incomplete; "
                 f"inspect destination={dest}, selected_backup={payload}, current_backup={current_payload}: {recovery_error}"
             ) from exc
-        if isinstance(exc, InstallError):
+        if isinstance(exc, InstallError) or not isinstance(exc, Exception):
             raise
         raise InstallError(f"rollback failed and current install restoration was attempted: {exc}") from exc
     finally:
@@ -740,8 +817,8 @@ def rollback(args: argparse.Namespace) -> int:
 
     print(f"Restored:    {dest}")
     print(f"Version:     {read_version(dest)}")
-    if current_backup:
-        print(f"Previous current install backed up to: {current_backup}")
+    if state.backup_created:
+        print(f"Previous current install backed up to: {state.backup_dir}")
     print("Note: rollback restores the recorded prior entry exactly; run doctor separately to compare it with the repo package.")
     return 0
 
@@ -778,11 +855,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    def terminate(signum: int, _frame: Any) -> None:
+        raise InstallCancelled(signum)
+
+    previous_sigterm = signal.signal(signal.SIGTERM, terminate)
     try:
         return int(args.handler(args))
     except InstallError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    except (KeyboardInterrupt, InstallCancelled) as exc:
+        print("Cancelled; any started mutation was recovered or reported above.", file=sys.stderr)
+        return 128 + (exc.signum if isinstance(exc, InstallCancelled) else signal.SIGINT)
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

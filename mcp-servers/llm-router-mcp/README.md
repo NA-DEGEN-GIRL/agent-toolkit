@@ -35,7 +35,7 @@ this server for a trusted local MCP client on a machine where that is intended.
 ## Requirements and validation
 
 - Node.js 20+
-- `tmux`
+- `tmux` with `new-session -e`, `-P`, and `-F` support
 - Desired provider CLIs installed and logged in: `codex`, `claude`, `grok`,
   and/or `agy`
 
@@ -159,7 +159,13 @@ run or duplicated; the router resolves the executable and applies its own
 policy. Executable wrappers are supported conservatively:
 
 - strict one-line shell wrappers of the form `exec <binary> <literal-args> "$@"`
-  are inspected for known bypass flags;
+  are inspected recursively (at most 8 files), with cycle detection and
+  fingerprints for every target; use literal executable paths, not `$HOME`
+  interpolation;
+- chains ending in a native binary are supported; opaque, missing, oversized,
+  cyclic, or custom Node/Python script targets fail closed, including when hidden
+  behind a strict outer wrapper. To use a provider's official script entrypoint,
+  prefer its default CLI name rather than a custom script wrapper;
 - opaque/multi-command shell wrappers and explicitly configured Node/Python or
   other non-shell scripts fail closed because they may ignore or rewrite
   router-supplied arguments; using one requires both
@@ -227,6 +233,33 @@ the session busy because the provider may still be working; call
 model, launcher, cwd, bypass policy, or terminal specification is never silently
 applied to an existing session: stop the session first.
 
+### Cancellation and upgrades
+
+MCP cancellation terminates headless process groups with TERM then KILL and
+retains their concurrency slots until cleanup finishes. Cancelling a tmux wait
+stops only the wait: it does not abandon the running provider or clear its busy
+lock. Retry `llm_tmux_wait`, or explicitly stop the session. If a send/ask was
+cancelled after dispatch and its result was lost, `llm_tmux_status.activeRequest`
+returns the nonce/request ID needed to resume waiting.
+
+A creation-time tmux owner token permits recovery even if the `new-session`
+client times out or loses its stdout after creating the session. Failed cleanup
+retains uncertain launch metadata; automatic recovery/stop requires the actual
+session token to match, not just a same-named session. This check applies to all
+interrupted starts, including crashes before creation. Legacy starting records
+without a matching creation-time token fail closed rather than claiming sessions.
+
+Startup cancellation removes only a session created by that startup attempt;
+reusing an existing session never gives cancellation permission to kill it.
+A queued stop remains cancellable until the kill is submitted.
+Once tmux dispatch starts, delivery and its busy-lock bookkeeping finish as a
+unit even if the MCP caller cancels. A stop already in progress likewise finishes
+its cleanup rather than leaving partially removed state.
+
+Session names share one lock namespace across providers. Before upgrading,
+stop router sessions and restart **all** MCP server processes sharing the state
+root; do not run old and new versions together, because the lock layout changed.
+
 ## Runtime state and security
 
 State resolution order is:
@@ -283,7 +316,10 @@ Startup readiness uses an owned live-pane check plus a quiet stabilization
 window; it is deliberately conservative but remains best-effort because provider
 TUIs do not expose a common machine-readable ready signal. The default quiet
 window is 2 seconds and can be adjusted with
-`LLM_ROUTER_MCP_READY_SETTLE_MS` (250-10000).
+`LLM_ROUTER_MCP_READY_SETTLE_MS` (250-10000). Startup uses the caller's single
+end-to-end timeout across lock acquisition and readiness; a slow cold start is
+not subject to an additional hidden 5-second cap. Allow enough time for both
+provider startup and the quiet window.
 
 Common cases:
 

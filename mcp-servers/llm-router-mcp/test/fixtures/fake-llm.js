@@ -16,6 +16,12 @@ if (args.includes("--help") || args.includes("-h")) {
 
 if (isHeadless(args)) {
   const prompt = readHeadlessPrompt(args);
+  if (prompt.includes("HANG_HEADLESS")) {
+    if (process.env.LLM_ROUTER_TEST_PID_FILE) {
+      fs.writeFileSync(process.env.LLM_ROUTER_TEST_PID_FILE, String(process.pid));
+    }
+    await new Promise(() => { setInterval(() => {}, 1000); });
+  }
   if (prompt.includes("SLOW_HEADLESS")) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 600);
   }

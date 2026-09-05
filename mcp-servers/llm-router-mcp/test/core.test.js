@@ -460,7 +460,7 @@ test("session startup recovers a reclaim marker abandoned by a dead lock owner",
   const launchLock = path.join(
     fixture.tmp,
     "sessions",
-    provider,
+    "launch-locks",
     `${sessionName}.launch-lock`
   );
   await fs.mkdir(launchLock, { recursive: true, mode: 0o700 });
@@ -506,7 +506,7 @@ test("session startup recovers an abandoned reclaim marker with no owner file", 
   const launchLock = path.join(
     fixture.tmp,
     "sessions",
-    provider,
+    "launch-locks",
     `${sessionName}.launch-lock`
   );
   await fs.mkdir(launchLock, { recursive: true, mode: 0o700 });
@@ -877,6 +877,8 @@ async function createStartingSessionArtifact({ fixture, provider, sessionName })
       "-f",
       "/dev/null",
       "new-session",
+      "-e",
+      "LLM_ROUTER_MCP_OWNER=abandoned-owner-token",
       "-d",
       "-s",
       sessionName,
@@ -886,3 +888,361 @@ async function createStartingSessionArtifact({ fixture, provider, sessionName })
   );
   assert.equal(result.code, 0, result.stderr);
 }
+
+test("same-name concurrent providers cannot remove the winning tmux session", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const sessionName = `${fixture.sessionPrefix}-shared`;
+  for (const provider of ["claude", "codex"]) fixture.trackSession(provider, sessionName);
+  const results = await Promise.allSettled(["claude", "codex"].map(provider => ensureSession({
+    provider, sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+    allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 5000
+  })));
+  assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter(result => result.status === "rejected").length, 1);
+  const winner = results.find(result => result.status === "fulfilled").value;
+  assert.equal(await hasSession({ provider: winner.provider, sessionName, stateDir: fixture.tmp }), true);
+  assert.equal((await status({ provider: winner.provider, sessionName, stateDir: fixture.tmp })).running, true);
+});
+
+test("startup readiness permits delayed output within the requested timeout", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-delayed-ready`;
+  fixture.trackSession(provider, sessionName);
+  const script = path.join(fixture.tmp, "delayed.cjs");
+  await fs.writeFile(script, "setTimeout(() => console.log('fake ready'), 3800); setInterval(() => {}, 1000);\n");
+  const started = await ensureSession({
+    provider, sessionName, stateDir: fixture.tmp,
+    command: `${shellQuote(process.execPath)} ${shellQuote(script)}`,
+    allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 8000
+  });
+  assert.equal(started.ready, true);
+});
+
+test("timeout and abort kill TERM-resistant descendants after the leader exits", async (t) => {
+  if (process.platform !== "linux") return t.skip("checks Linux process state including zombies");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-group-kill-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  for (const mode of ["timeout", "abort"]) {
+    const pidFile = path.join(directory, `${mode}.pid`);
+    const descendant = `process.on('SIGTERM',()=>{});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000)`;
+    const parent = `require('child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:'ignore'});setInterval(()=>{},1000)`;
+    const controller = new AbortController();
+    const run = runCommand(process.execPath, ["-e", parent], {
+      timeoutMs: mode === "timeout" ? 1000 : 10_000,
+      killProcessGroup: true, signal: controller.signal
+    });
+    const rejected = assert.rejects(run, error => mode === "timeout"
+      ? error.details.timedOut === true : error.details.code === "ERR_CANCELLED");
+    await waitUntil(async () => await fs.access(pidFile).then(() => true, () => false));
+    const pid = Number(await fs.readFile(pidFile, "utf8"));
+    try {
+      if (mode === "abort") controller.abort();
+      await rejected;
+      await waitUntil(async () => !(await runningLinuxPid(pid)));
+      assert.equal(await runningLinuxPid(pid), false);
+    } finally {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+});
+
+test("headless cancellation terminates the provider and releases its concurrency slot", async (t) => {
+  await makeFakePath(t);
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-cancel-headless-"));
+  const pidFile = path.join(stateDir, "provider.pid");
+  const previous = process.env.LLM_ROUTER_TEST_PID_FILE;
+  process.env.LLM_ROUTER_TEST_PID_FILE = pidFile;
+  t.after(async () => {
+    if (previous === undefined) delete process.env.LLM_ROUTER_TEST_PID_FILE;
+    else process.env.LLM_ROUTER_TEST_PID_FILE = previous;
+    await fs.rm(stateDir, { recursive: true, force: true });
+  });
+  const controller = new AbortController();
+  const rejected = assert.rejects(headlessAsk({
+    provider: "claude", markdown: "HANG_HEADLESS", stateDir,
+    timeoutMs: 10_000, signal: controller.signal
+  }), error => error.details.code === "ERR_CANCELLED");
+  await waitUntil(async () => await fs.access(pidFile).then(() => true, () => false));
+  controller.abort();
+  await rejected;
+  const next = await headlessAsk({ provider: "claude", markdown: "after cancellation", stateDir, timeoutMs: 5000 });
+  assert.equal(next.success, true);
+});
+
+test("cancelled tmux waits preserve active requests and cancellation never kills a reused session", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-cancel-wait`;
+  fixture.trackSession(provider, sessionName);
+  const input = await writeInputFile({ provider, markdown: "NO_DONE_MARKER", stateDir: fixture.tmp });
+  const sent = await sendInput({
+    provider, sessionName, inputPath: input.inputPath, stateDir: fixture.tmp,
+    command: fixture.fakeCommand, allowUnverifiedLauncher: true, timeoutMs: 5000
+  });
+  const controller = new AbortController();
+  const rejected = assert.rejects(waitForResponse({
+    provider, sessionName, nonce: sent.nonce, stateDir: fixture.tmp,
+    signal: controller.signal, timeoutMs: 10_000, pollMs: 50
+  }), error => error.details.code === "ERR_CANCELLED");
+  setTimeout(() => controller.abort(), 100);
+  await rejected;
+  const current = await status({ provider, sessionName, stateDir: fixture.tmp });
+  assert.equal(current.running, true);
+  assert.equal(current.busy, true);
+  assert.equal(current.activeRequest.nonce, sent.nonce);
+  const reuse = new AbortController();
+  const reuseRejected = assert.rejects(ensureSession({
+    provider, sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+    allowUnverifiedLauncher: true, timeoutMs: 5000, signal: reuse.signal
+  }), error => error.details.code === "ERR_CANCELLED");
+  setTimeout(() => reuse.abort(), 100);
+  await reuseRejected;
+  assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), true);
+});
+
+test("cancelled startup removes only the session created by that request", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-cancel-start`;
+  fixture.trackSession(provider, sessionName);
+  const script = path.join(fixture.tmp, "silent.cjs");
+  await fs.writeFile(script, "setInterval(() => {}, 1000);\n");
+  const controller = new AbortController();
+  const rejected = assert.rejects(ensureSession({
+    provider, sessionName, stateDir: fixture.tmp,
+    command: `${shellQuote(process.execPath)} ${shellQuote(script)}`,
+    allowUnverifiedLauncher: true, timeoutMs: 8000, signal: controller.signal
+  }), error => error.details.code === "ERR_CANCELLED");
+  await waitUntil(() => hasSession({ provider, sessionName, stateDir: fixture.tmp }));
+  controller.abort();
+  await rejected;
+  assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), false);
+});
+
+async function waitUntil(predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail("condition did not become true before timeout");
+}
+
+async function runningLinuxPid(pid) {
+  try {
+    const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    return !/\) [ZX] /.test(stat);
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+test("startup lock contention and readiness share one timeout budget", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-shared-deadline`;
+  fixture.trackSession(provider, sessionName);
+  const capacityLock = path.join(fixture.tmp, "sessions", ".capacity-lock");
+  await fs.mkdir(capacityLock, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(capacityLock, "owner.json"), JSON.stringify({
+    token: "test-capacity-owner", pid: process.pid, kind: "capacity"
+  }));
+  const release = setTimeout(() => fs.rm(capacityLock, { recursive: true, force: true }), 1100);
+  t.after(() => clearTimeout(release));
+  const script = path.join(fixture.tmp, "contended.cjs");
+  await fs.writeFile(script, "setTimeout(() => console.log('fake ready'), 1400); setInterval(() => {}, 1000);\n");
+  await assert.rejects(ensureSession({
+    provider, sessionName, stateDir: fixture.tmp,
+    command: `${shellQuote(process.execPath)} ${shellQuote(script)}`,
+    allowUnverifiedLauncher: true, timeoutMs: 2300
+  }), error => ["ERR_PROVIDER_NOT_READY", "ERR_SESSION_START_TIMEOUT"].includes(error.details.code));
+  assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), false);
+});
+
+test("timed-out new-session clients do not orphan created sessions, with or without stdout", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const tmux = (await runCommand("sh", ["-c", "command -v tmux"])).stdout.trim();
+  const shimDir = path.join(fixture.tmp, "shim");
+  await fs.mkdir(shimDir);
+  const previousPrefix = process.env.LLM_ROUTER_MCP_PATH_PREFIX;
+  try {
+    for (const { suppressOutput, failProbe } of [
+      { suppressOutput: false, failProbe: false },
+      { suppressOutput: true, failProbe: false },
+      { suppressOutput: true, failProbe: true }
+    ]) {
+      const shim = `#!/bin/sh
+case " $* " in
+  ${failProbe ? '*" show-environment "*) echo "injected probe failure" >&2; exit 2 ;;' : ""}
+  *" new-session "*)
+    ${shellQuote(tmux)} "$@"${suppressOutput ? " >/dev/null" : ""}
+    code=$?
+    sleep 3
+    exit "$code"
+    ;;
+  *) exec ${shellQuote(tmux)} "$@" ;;
+esac
+`;
+      await fs.writeFile(path.join(shimDir, "tmux"), shim, { mode: 0o755 });
+      process.env.LLM_ROUTER_MCP_PATH_PREFIX = shimDir;
+      const provider = "claude";
+      const sessionName = `${fixture.sessionPrefix}-timeout-create-${failProbe ? "recover" : suppressOutput ? "hidden" : "visible"}`;
+      fixture.trackSession(provider, sessionName);
+      await assert.rejects(ensureSession({
+        provider, sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+        allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 1000
+      }), error => error.details.timedOut === true);
+      if (failProbe) {
+        assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), true);
+        const pending = JSON.parse(await fs.readFile(path.join(fixture.tmp, "sessions", provider, `${sessionName}.json`), "utf8"));
+        assert.equal(pending.creationUncertain, true);
+        if (previousPrefix === undefined) delete process.env.LLM_ROUTER_MCP_PATH_PREFIX;
+        else process.env.LLM_ROUTER_MCP_PATH_PREFIX = previousPrefix;
+        await killSession({ provider, sessionName, stateDir: fixture.tmp, requireOwned: true });
+      }
+      assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), false);
+      await assert.rejects(fs.stat(path.join(fixture.tmp, "sessions", provider, `${sessionName}.json`)),
+        { code: "ENOENT" });
+    }
+  } finally {
+    if (previousPrefix === undefined) delete process.env.LLM_ROUTER_MCP_PATH_PREFIX;
+    else process.env.LLM_ROUTER_MCP_PATH_PREFIX = previousPrefix;
+  }
+});
+
+test("queued stop cancellation leaves sessions alive for both launch and capacity locks", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-cancel-stop`;
+  fixture.trackSession(provider, sessionName);
+  await ensureSession({
+    provider, sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+    allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 5000
+  });
+  for (const lockPath of [
+    path.join(fixture.tmp, "sessions", "launch-locks", `${sessionName}.launch-lock`),
+    path.join(fixture.tmp, "sessions", ".capacity-lock")
+  ]) {
+    await fs.mkdir(lockPath, { mode: 0o700 });
+    await fs.writeFile(path.join(lockPath, "owner.json"), JSON.stringify({
+      pid: process.pid, token: "queued-stop-test-lock", kind: "capacity"
+    }));
+    try {
+      const controller = new AbortController();
+      const rejected = assert.rejects(killSession({
+        provider, sessionName, stateDir: fixture.tmp, requireOwned: true, signal: controller.signal
+      }), error => error.details.code === "ERR_CANCELLED");
+      await new Promise(resolve => setTimeout(resolve, 100));
+      controller.abort();
+      // A queued cancellation must settle without waiting for lock release.
+      await Promise.race([
+        rejected,
+        new Promise((_, reject) => {
+          const timer = setTimeout(() => reject(new Error("queued cancellation did not settle")), 1000);
+          rejected.then(() => clearTimeout(timer), () => clearTimeout(timer));
+        })
+      ]);
+    } finally {
+      await fs.rm(lockPath, { recursive: true, force: true });
+    }
+    assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), true);
+  }
+});
+
+test("uncertain launch metadata cannot authorize stopping an unrelated same-name session", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-uncertain-owner`;
+  fixture.trackSession(provider, sessionName);
+  await createStartingSessionArtifact({ fixture, provider, sessionName });
+  const metadataPath = path.join(fixture.tmp, "sessions", provider, `${sessionName}.json`);
+  const metadata = JSON.parse(await fs.readFile(metadataPath, "utf8"));
+  metadata.creationUncertain = true;
+  metadata.ownerToken = "not-the-live-session-owner";
+  await fs.writeFile(metadataPath, JSON.stringify(metadata));
+  await assert.rejects(killSession({ provider, sessionName, stateDir: fixture.tmp, requireOwned: true }),
+    error => error.details.code === "ERR_SESSION_NOT_OWNED");
+  await assert.rejects(ensureSession({
+    provider, sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+    allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 5000
+  }), error => error.details.code === "ERR_SESSION_NOT_OWNED");
+  assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), true);
+});
+
+test("stale pre-creation intent cannot claim another provider's ready session", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const sessionName = `${fixture.sessionPrefix}-stale-intent`;
+  fixture.trackSession("claude", sessionName);
+  fixture.trackSession("codex", sessionName);
+  await createStartingSessionArtifact({ fixture, provider: "claude", sessionName });
+  // Retain only the starting intent, as if its writer had crashed before
+  // creating a session; another provider can now legitimately use the name.
+  await runCommand("tmux", ["-L", tmuxSocketLabel(fixture.tmp), "-f", "/dev/null", "kill-session", "-t", `=${sessionName}`]);
+  await ensureSession({
+    provider: "codex", sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+    allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 5000
+  });
+  await assert.rejects(ensureSession({
+    provider: "claude", sessionName, stateDir: fixture.tmp, command: fixture.fakeCommand,
+    allowUnverifiedLauncher: true, cwd: fixture.cwd, timeoutMs: 5000
+  }), error => error.details.code === "ERR_SESSION_NOT_OWNED");
+  await assert.rejects(killSession({ provider: "claude", sessionName, stateDir: fixture.tmp, requireOwned: true }),
+    error => error.details.code === "ERR_SESSION_NOT_OWNED");
+  assert.equal((await status({ provider: "codex", sessionName, stateDir: fixture.tmp })).running, true);
+});
+
+test("ownership lookup cannot transfer authorization to a same-name replacement", async (t) => {
+  const fixture = await makeFixture(t);
+  if (!fixture) return;
+  const provider = "claude";
+  const sessionName = `${fixture.sessionPrefix}-replace-during-auth`;
+  const keeperName = `${fixture.sessionPrefix}-keeper`;
+  fixture.trackSession(provider, sessionName);
+  fixture.trackSession(provider, keeperName);
+  await createStartingSessionArtifact({ fixture, provider, sessionName });
+  const tmux = (await runCommand("sh", ["-c", "command -v tmux"])).stdout.trim();
+  const socket = tmuxSocketLabel(fixture.tmp);
+  // Keep the tmux server alive so IDs are never reused during replacement.
+  await runCommand(tmux, ["-L", socket, "new-session", "-d", "-s", keeperName, "sleep 30"]);
+  const shimDir = path.join(fixture.tmp, "race-shim");
+  await fs.mkdir(shimDir);
+  const onceFile = path.join(shimDir, "replaced");
+  await fs.writeFile(path.join(shimDir, "tmux"), `#!/bin/sh
+case " $* " in
+  *" show-environment "*)
+    ${shellQuote(tmux)} "$@"
+    code=$?
+    if test ! -f ${shellQuote(onceFile)}; then
+      touch ${shellQuote(onceFile)}
+      ${shellQuote(tmux)} -L ${shellQuote(socket)} kill-session -t ${shellQuote(`=${sessionName}`)}
+      ${shellQuote(tmux)} -L ${shellQuote(socket)} new-session -d -s ${shellQuote(sessionName)} -e LLM_ROUTER_MCP_OWNER=external "sleep 30"
+    fi
+    exit "$code"
+    ;;
+  *) exec ${shellQuote(tmux)} "$@" ;;
+esac
+`, { mode: 0o755 });
+  const previousPrefix = process.env.LLM_ROUTER_MCP_PATH_PREFIX;
+  process.env.LLM_ROUTER_MCP_PATH_PREFIX = shimDir;
+  try {
+    await assert.rejects(killSession({ provider, sessionName, stateDir: fixture.tmp, requireOwned: true }),
+      error => ["ERR_SESSION_STOP_FAILED", "ERR_SESSION_NOT_OWNED"].includes(error.details.code));
+    assert.equal(await hasSession({ provider, sessionName, stateDir: fixture.tmp }), true);
+    const replacement = await runCommand(tmux, ["-L", socket, "show-environment", "-t", `=${sessionName}`, "LLM_ROUTER_MCP_OWNER"]);
+    assert.equal(replacement.stdout.trim(), "LLM_ROUTER_MCP_OWNER=external");
+  } finally {
+    if (previousPrefix === undefined) delete process.env.LLM_ROUTER_MCP_PATH_PREFIX;
+    else process.env.LLM_ROUTER_MCP_PATH_PREFIX = previousPrefix;
+  }
+});

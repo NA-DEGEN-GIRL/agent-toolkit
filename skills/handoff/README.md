@@ -23,9 +23,13 @@ Both variants also support optional **scoped lanes** (`.handoff/scopes/<scope>/`
 Version 0.1.11 moves security-critical snapshot I/O out of prose and into shared, byte-identical helpers in both variants:
 
 - `save_snapshot.py` validates a bounded input, refuses symlinked/non-regular lane paths, creates an exclusive dated backup, atomically replaces `latest.md`, verifies parity, requires CAS for an existing latest, uses atomic name exchange where the OS provides a secure dir-fd primitive, and applies per-agent retention. Its OS advisory lock auto-releases after crashes; a leftover unlocked lock file is reusable.
-- `select_snapshot.py` chooses valid `latest.md` first and then the newest valid same-lane backup; it never crosses lane boundaries.
+- `select_snapshot.py` chooses valid `latest.md` first and then the newest valid same-lane backup; it never crosses lane boundaries. Use `--content` to read the validated bytes with best-effort redaction; user-facing path labels are display-only, while explicit `--path-only` preserves an exact machine path.
 - `list_lanes.py` discovers validated lanes, including safe backup-only (orphan) scoped lanes.
 - `validate_snapshot.py` is the single-path diagnostic and uses the same centralized parser and bounded reader.
+
+The state probe deliberately avoids worktree hashing and Git clean/process filters; its index/stat comparisons are conservative, dirty state is `unknown`, and line-count stats are omitted. Marker updates use no-clobber creation or atomic exchange and preserve concurrent edits on conflict.
+
+CLI helpers disable Python bytecode writes before importing bundled modules, so ordinary invocation does not add `__pycache__` to an installed skill or checkout. Examples also use `python3 -B` defensively.
 
 Snapshots remain untrusted data after validation. Validation establishes a safe file/format boundary; it does not make embedded instructions authoritative.
 

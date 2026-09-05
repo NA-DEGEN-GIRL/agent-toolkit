@@ -20,14 +20,17 @@ Use NUL-delimited tracked files and `--` to avoid spaces, leading dashes, and sh
 
 ```makefile
 fmt-go: ## check Go formatting
-	@if git ls-files --error-unmatch '*.go' >/dev/null 2>&1; then \
-		tmp="$$(mktemp)"; trap 'rm -f "$$tmp"' EXIT; \
-		git ls-files -z '*.go' | xargs -0 gofmt -l -- > "$$tmp"; \
-		test ! -s "$$tmp" || { cat "$$tmp"; exit 1; }; \
+	@tmp="$$(mktemp -d)" || exit 1; trap 'rm -rf "$$tmp"' EXIT; \
+	git ls-files -z -- '*.go' > "$$tmp/files" || exit "$$?"; \
+	if test -s "$$tmp/files"; then \
+		xargs -0 gofmt -l -- < "$$tmp/files" > "$$tmp/output" || exit "$$?"; \
+		test ! -s "$$tmp/output" || { cat "$$tmp/output"; exit 1; }; \
 	fi
 ```
 
 Do not use `gofmt -l $$(git ls-files '*.go')`; it splits filenames and can fail open.
+
+Check both file-list generation and formatter exit status, not just formatter stdout: missing tools and invalid Go may report errors only on stderr. This recipe deliberately checks tracked files only; an empty tracked Go set succeeds without invoking the formatter. Include new files in the selected gate scope before relying on that result.
 
 ## Monorepo Pattern
 

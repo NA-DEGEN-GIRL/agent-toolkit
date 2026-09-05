@@ -7,6 +7,8 @@ import re
 import argparse
 from pathlib import Path
 
+from prepare_skill_eval import validate_fixture
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCENARIOS = ROOT / "evals" / "scenarios.json"
@@ -24,8 +26,12 @@ def validate(scenarios_path: Path, catalog_path: Path) -> int:
     try:
         scenarios = json.loads(scenarios_path.read_text(encoding="utf-8"))
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         print(f"FAIL cannot load eval/catalog JSON: {exc}")
+        return 1
+
+    if not isinstance(scenarios, dict) or not isinstance(catalog, dict):
+        print("FAIL eval and catalog JSON must be objects")
         return 1
 
     failed |= check(scenarios.get("schema_version") == 1, "eval schema_version is 1")
@@ -74,6 +80,17 @@ def validate(scenarios_path: Path, catalog_path: Path) -> int:
         failed |= check(isinstance(case.get("request"), str) and bool(case["request"].strip()), f"{case_id} has a request")
         failed |= check(expected_valid, f"{case_id!r} has non-empty string expected assertions")
         failed |= check(forbidden_valid, f"{case_id!r} has non-empty string forbidden assertions")
+        if "fixture" in case:
+            fixture_name = case["fixture"]
+            if not id_valid or fixture_name != f"{case_id}.json":
+                failed |= check(False, f"{case_id!r} fixture filename matches case id")
+            else:
+                try:
+                    fixture_path = scenarios_path.parent / "fixtures" / fixture_name
+                    validate_fixture(json.loads(fixture_path.read_text(encoding="utf-8")))
+                    failed |= check(True, f"{case_id!r} has a safe inert fixture")
+                except (OSError, UnicodeError, ValueError) as exc:
+                    failed |= check(False, f"{case_id!r} invalid fixture: {exc}")
         if skills_valid:
             covered.update(skills)
 

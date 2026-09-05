@@ -21,7 +21,7 @@ REFS = [
 CRITICAL_REF_LITERALS = {
     "references/gate-contract.md": [
         ".DEFAULT_GOAL := check",
-        "git ls-files -z '*.go' | xargs -0 gofmt -l --",
+        "git ls-files -z -- '*.go'",
         "Empty Repos And Unknown Stacks",
         "exactly one selected canonical runner",
         "Make-only template",

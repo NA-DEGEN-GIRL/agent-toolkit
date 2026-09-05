@@ -68,16 +68,18 @@ Do not put modifying formatters in `fmt` or `check`:
 - Good simple examples: `cargo fmt --check`, `ruff format --check`, `prettier --check .`.
 - Safe Go Makefile recipe for tracked `.go` files, including spaces and leading dashes:
 
-  ```makefile
-  fmt-go: ## check Go formatting
-  	@if git ls-files --error-unmatch '*.go' >/dev/null 2>&1; then \
-  		tmp="$$(mktemp)"; trap 'rm -f "$$tmp"' EXIT; \
-  		git ls-files -z '*.go' | xargs -0 gofmt -l -- > "$$tmp"; \
-  		test ! -s "$$tmp" || { cat "$$tmp"; exit 1; }; \
-  	fi
-  ```
+```makefile
+fmt-go: ## check Go formatting
+	@tmp="$$(mktemp -d)" || exit 1; trap 'rm -rf "$$tmp"' EXIT; \
+	git ls-files -z -- '*.go' > "$$tmp/files" || exit "$$?"; \
+	if test -s "$$tmp/files"; then \
+		xargs -0 gofmt -l -- < "$$tmp/files" > "$$tmp/output" || exit "$$?"; \
+		test ! -s "$$tmp/output" || { cat "$$tmp/output"; exit 1; }; \
+	fi
+```
 
 - In Makefile recipes, shell command substitution must use `$$`, e.g. `$$(...)`; plain `$(...)` is consumed by Make and can turn a check into an always-pass command.
+- Check file-list and formatter exit status independently; missing tools or parse errors may leave stdout empty. The Go example checks tracked files only and skips the formatter when that set is empty.
 - Do not expand NUL-delimited file lists into unquoted shell words. Use `git ls-files -z` with `xargs -0` (and `--` when the tool accepts it) or an equivalent script.
 - Apply commands belong in `fmt-apply`, e.g. `cargo fmt`, `ruff format`, `prettier --write .`, or `gofmt -w` on selected files.
 - Before running `fmt-apply` or any tree-wide formatter/codegen, require a clean working tree or explicit user approval plus a rollback plan.

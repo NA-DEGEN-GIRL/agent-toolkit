@@ -2,6 +2,11 @@
 """Safely save a validated handoff backup and atomically update latest.md."""
 from __future__ import annotations
 
+import sys
+
+# Helper invocation must not mutate the installed/source package via imports.
+sys.dont_write_bytecode = True
+
 import argparse
 import ctypes
 import hashlib
@@ -9,7 +14,6 @@ import os
 import re
 import secrets
 import stat
-import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -227,11 +231,22 @@ def rename_exchange_available(directory_fd: int | None = None) -> bool:
     return True
 
 
-def rollback_exchange_if_ours(handle: DirectoryHandle, tmp_name: str, new_identity: tuple[int, int]) -> bool:
-    """Rollback, detecting a writer that raced between identity check/exchange."""
+def rollback_exchange_if_ours(handle: DirectoryHandle, tmp_name: str, new_identity: tuple[int, int], new_data: bytes) -> bool:
+    """Rollback only our bytes, detecting pathname and in-place writer races."""
+    def is_ours(name: str) -> bool:
+        try:
+            info = os.stat(name, dir_fd=handle.fd, follow_symlinks=False)
+            return (
+                (info.st_dev, info.st_ino) == new_identity
+                and read_regular_bounded_at(handle, name, len(new_data)) == new_data
+            )
+        except (OSError, SnapshotError):
+            return False
+
+    if not is_ours("latest.md"):
+        return False
     rename_exchange_at(handle.fd, "latest.md", tmp_name)
-    after = os.stat(tmp_name, dir_fd=handle.fd, follow_symlinks=False)
-    if (after.st_dev, after.st_ino) == new_identity:
+    if is_ours(tmp_name):
         return True
     # A new writer replaced our latest just before rollback.  Swap again so
     # that writer regains latest; preserve the displaced snapshot in tmp_name.
@@ -288,7 +303,7 @@ def atomic_latest_cas(
                     except OSError:
                         return False, "latest.md disappeared during CAS verification", tmp_name
                 if current is not None and (current.st_dev, current.st_ino) == new_identity:
-                    restored = rollback_exchange_if_ours(handle, tmp_name, new_identity)
+                    restored = rollback_exchange_if_ours(handle, tmp_name, new_identity, data)
                     latest_installed = False
                     if restored:
                         exchanged = False
@@ -323,7 +338,7 @@ def atomic_latest_cas(
             try:
                 current = os.stat("latest.md", dir_fd=handle.fd, follow_symlinks=False)
                 if (current.st_dev, current.st_ino) == new_identity:
-                    restored = rollback_exchange_if_ours(handle, tmp_name, new_identity)
+                    restored = rollback_exchange_if_ours(handle, tmp_name, new_identity, data)
                     latest_installed = False
                     if restored:
                         exchanged = False

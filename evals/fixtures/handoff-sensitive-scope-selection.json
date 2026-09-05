@@ -1,0 +1,8 @@
+{
+  "files": {
+    "repo/README.md": "# Report Formatter\n",
+    "repo/.handoff/latest.md": "# Handoff Snapshot\n\n## Metadata\n- Schema Version: handoff-v1\n- Agent: codex\n- Created at: 2026-09-05T00:00:00Z\n\n## Project Goal\nUnrelated default-lane task: chart colors.\n",
+    "repo/.handoff/scopes/secrets/latest.md": "# Handoff Snapshot\n\n## Metadata\n- Schema Version: handoff-v1\n- Agent: codex\n- Created at: 2026-09-05T00:00:00Z\n- Scope: secrets\n\n## Project Goal\nDocument the report redaction feature.\n\n## Current Work\nAgree on placeholder naming before implementation.\n"
+  },
+  "symlinks": {}
+}

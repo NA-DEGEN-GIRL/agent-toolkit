@@ -89,15 +89,9 @@ test("stdio MCP server can ask a provider through a tmux-backed fake session", a
     return;
   }
   const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-mcp-stdio-"));
-  const fakeClaude = path.join(tmp, "fake-claude");
-  const fakeClaudeReal = path.join(tmp, "fake-claude-real");
-  await fs.copyFile(FAKE_LLM, fakeClaudeReal);
-  await fs.chmod(fakeClaudeReal, 0o755);
-  await fs.writeFile(
-    fakeClaude,
-    `#!/bin/sh\nexec ${shellQuote(fakeClaudeReal)} "$@"\n`,
-    { mode: 0o755 }
-  );
+  const fakeClaude = path.join(tmp, "claude");
+  await fs.copyFile(FAKE_LLM, fakeClaude);
+  await fs.chmod(fakeClaude, 0o755);
   const sessionName = `lrm-stdio-${process.pid}-${Date.now()}`;
   t.after(async () => {
     await killSession({ provider: "claude", sessionName, stateDir: tmp });
@@ -116,7 +110,7 @@ test("stdio MCP server can ask a provider through a tmux-backed fake session", a
       ...process.env,
       LLM_ROUTER_MCP_STATE_DIR: tmp,
       LLM_ROUTER_MCP_READY_SETTLE_MS: "250",
-      LLM_ROUTER_MCP_CLAUDE_EXECUTABLE: fakeClaude
+      LLM_ROUTER_MCP_PATH_PREFIX: tmp
     },
     stderr: "pipe"
   });
@@ -164,6 +158,57 @@ function parseToolResult(result) {
   return JSON.parse(result.content[0].text);
 }
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, "'\\''")}'`;
-}
+
+test("MCP cancellation reaches headless subprocesses and releases the provider slot", async (t) => {
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "llm-router-mcp-cancel-"));
+  const pidFile = path.join(tmp, "provider.pid");
+  const fakeClaude = path.join(tmp, "claude");
+  await fs.copyFile(FAKE_LLM, fakeClaude);
+  await fs.chmod(fakeClaude, 0o755);
+  t.after(() => fs.rm(tmp, { recursive: true, force: true }));
+  const client = new Client({ name: "cancellation-test", version: "0.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath, args: [SERVER_ENTRYPOINT], cwd: PACKAGE_DIR, stderr: "pipe",
+    env: {
+      ...process.env,
+      LLM_ROUTER_MCP_STATE_DIR: tmp,
+      LLM_ROUTER_MCP_PATH_PREFIX: tmp,
+      LLM_ROUTER_MCP_CLAUDE_EXECUTABLE: "",
+      LLM_ROUTER_TEST_PID_FILE: pidFile
+    }
+  });
+  let pid;
+  try {
+    await client.connect(transport);
+    const controller = new AbortController();
+    const rejected = assert.rejects(client.callTool({
+      name: "llm_headless_ask",
+      arguments: { provider: "claude", markdown: "HANG_HEADLESS", timeoutMs: 15_000 }
+    }, undefined, { signal: controller.signal }));
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      try { pid = Number(await fs.readFile(pidFile, "utf8")); break; }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.ok(pid, "fake provider should have started before cancellation");
+    controller.abort();
+    await rejected;
+    let response;
+    const cleanupDeadline = Date.now() + 4000;
+    while (Date.now() < cleanupDeadline) {
+      response = await client.callTool({
+        name: "llm_headless_ask", arguments: { provider: "claude", markdown: "after MCP cancellation", timeoutMs: 5000 }
+      });
+      if (!response.isError) break;
+      assert.match(response.content[0].text, /concurrency limit/);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    assert.equal(response.isError, undefined);
+    assert.equal(parseToolResult(response).success, true);
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally {
+    if (pid) try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+    await client.close();
+  }
+});

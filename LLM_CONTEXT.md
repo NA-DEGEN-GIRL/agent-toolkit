@@ -81,12 +81,12 @@ The user asked to keep these local, agent-specific where needed, and not patch i
 
 The handoff package narrows the gap between prose promises and code:
 
-- `handoff_snapshot.py` does not report failed git status as clean; failures become `unknown`.
+- `handoff_snapshot.py` avoids worktree hashing/Git clean and process filters. It emits conservative index/stat hints and staged paths; worktree dirty state remains `unknown`, and line-count diff stats are omitted.
 - Sensitive-looking paths are redacted, not printed raw. This is path/metadata protection, not full content scanning.
 - Non-git fallback scans are bounded by `--max-files` and `--max-depth`.
 - `snapshot_common.py` centralizes bounded regular-file reads, no-symlink/in-lane containment, scope/path agreement, metadata parsing, safe display, lane discovery, and latest-to-backup selection primitives.
 - `validate_snapshot.py` must be used before loading a snapshot; oversized, non-regular, symlinked, path-escaping, invalid UTF-8/binary/wrong-heading files are rejected before content is parsed.
-- `select_snapshot.py` chooses valid `latest.md` first and then the newest valid dated backup in exactly one lane, including backup-only orphan lanes; scoped lanes never fall back to default.
+- `select_snapshot.py` chooses valid `latest.md` first and then the newest valid dated backup in exactly one lane, including backup-only orphan lanes; scoped lanes never fall back to default. Resume uses `--content` for already-validated, best-effort-redacted bytes; displayed paths are not machine paths, and exact `--path-only` output is for local capture only.
 - `save_snapshot.py` validates the payload, creates the dated backup exclusively, protects `latest.md` with lock/CAS/recent-writer checks, updates it atomically, verifies latest/backup parity, and enforces retention.
 - `apply_marker_block.py` implements idempotent BEGIN/END marker replacement instead of relying only on prose.
 - `prune_backups.py` rejects symlinked `.handoff`, skips symlinked files, validates timestamped snapshot filenames, and protects `latest.md`.

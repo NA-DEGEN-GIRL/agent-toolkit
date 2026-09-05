@@ -6,6 +6,11 @@ must never read a snapshot first and validate it afterwards.
 """
 from __future__ import annotations
 
+import sys
+
+# Helper invocation must not mutate the installed/source package via imports.
+sys.dont_write_bytecode = True
+
 import hashlib
 import os
 import re
@@ -255,6 +260,22 @@ def sanitize_display(value: str, max_chars: int = 160) -> str:
     if max_chars > 0 and len(clean) > max_chars:
         clean = clean[: max_chars - 1] + "…"
     return clean or "Unknown"
+
+
+def redact_snapshot_content(text: str) -> str:
+    """Redact a validated snapshot for reading, preserving its line structure.
+
+    This is a best-effort disclosure guard, not authority or a promise to
+    recognize arbitrary credentials. Snapshots must already exclude secrets.
+    """
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text)
+    clean = _HOME_RE.sub("~", clean)
+    clean = _URL_RE.sub("[REDACTED-URL]", clean)
+    for pattern in _TOKEN_PATTERNS:
+        clean = pattern.sub("[REDACTED]", clean)
+    clean = _SENSITIVE_PATH_RE.sub("[SENSITIVE-PATH]", clean)
+    clean = _EMAIL_RE.sub("[REDACTED-EMAIL]", clean)
+    return clean.replace("![", "!［").replace("](", "］(").replace("<", "‹").replace(">", "›")
 
 
 def redact_label(kind: str, value: str) -> str:

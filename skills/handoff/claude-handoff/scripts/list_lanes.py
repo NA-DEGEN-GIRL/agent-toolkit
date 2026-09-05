@@ -2,9 +2,13 @@
 """List safe handoff lanes, including backup-only (orphan) lanes."""
 from __future__ import annotations
 
+import sys
+
+# Helper invocation must not mutate the installed/source package via imports.
+sys.dont_write_bytecode = True
+
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from snapshot_common import (
@@ -58,13 +62,13 @@ def main() -> int:
         if snapshot is None:
             invalid = True
             reason = errors[0] if errors else "no valid snapshot"
-            print(f"- {lane.label}: INVALID ({sanitize_display(reason, 240)})")
+            print(f"- {sanitize_display(lane.label)}: INVALID ({sanitize_display(reason, 240)})")
             continue
         agent = sanitize_display(snapshot.metadata.get("Agent", "Unknown"))
         created = sanitize_display(snapshot.metadata.get("Created at", "Unknown"))
         goal = sanitize_display(first_section_line(snapshot.text, "## Project Goal") or "(no goal line)", 100)
         source = "latest" if snapshot.path and snapshot.path.name == "latest.md" else "backup"
-        print(f"- {lane.label}: agent={agent}, created={created}, source={source}")
+        print(f"- {sanitize_display(lane.label)}: agent={agent}, created={created}, source={source}")
         print(f"    goal: {goal}")
         if snapshot.path is not None:
             print(f"    path: {path_display(snapshot.path, root)}")

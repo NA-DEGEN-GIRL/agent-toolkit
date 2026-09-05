@@ -151,14 +151,20 @@ export function listProviders() {
 }
 
 export async function doctorProviders(options = {}) {
+  throwIfAborted(options.signal);
   const providerIds = options.provider
     ? [normalizeProvider(options.provider)]
     : Object.keys(PROVIDERS);
   const environment = mergedEnv();
   const tmux = await runCommand("tmux", ["-V"], {
     allowFailure: true,
-    timeoutMs: 5000
-  }).catch((error) => ({ code: null, stdout: "", stderr: error.message }));
+    timeoutMs: 5000,
+    signal: options.signal,
+    killProcessGroup: true
+  }).catch((error) => {
+    throwIfAborted(options.signal);
+    return { code: null, stdout: "", stderr: error.message };
+  });
   const reports = [];
 
   for (const provider of providerIds) {
@@ -189,6 +195,8 @@ export async function doctorProviders(options = {}) {
           const versionRun = await runCommand(launcher.command, ["--version"], {
             allowFailure: true,
             timeoutMs: 5000,
+            signal: options.signal,
+            killProcessGroup: true,
             maxOutputBytes: 64 * 1024
           });
           version = truncateText((versionRun.stdout || versionRun.stderr).trim(), 500) || null;
@@ -197,6 +205,8 @@ export async function doctorProviders(options = {}) {
             const probe = await runCommand(launcher.command, [...launcher.args, "--help"], {
               allowFailure: true,
               timeoutMs: 5000,
+              signal: options.signal,
+              killProcessGroup: true,
               maxOutputBytes: 128 * 1024
             });
             launchProbeAccepted = probe.code === 0;
@@ -228,6 +238,7 @@ export async function doctorProviders(options = {}) {
         wrapperInspection: "strict one-line shell exec wrappers with literal known flags"
       });
     } catch (error) {
+      throwIfAborted(options.signal);
       reports.push({
         provider,
         available: false,
@@ -367,6 +378,7 @@ export async function buildTmuxCommand(provider, model, options = {}) {
 }
 
 export async function runCommand(command, args = [], options = {}) {
+  throwIfAborted(options.signal);
   const timeoutMs = normalizeTimeout(options.timeoutMs, 15000);
   const maxOutputBytes = normalizeOutputLimit(options.maxOutputBytes);
   const startedAt = Date.now();
@@ -378,123 +390,89 @@ export async function runCommand(command, args = [], options = {}) {
       stdio: ["pipe", "pipe", "pipe"],
       detached: options.killProcessGroup === true && process.platform !== "win32"
     });
-
     const stdoutCapture = createBoundedCapture(maxOutputBytes);
     const stderrCapture = createBoundedCapture(maxOutputBytes);
     let settled = false;
-    let timedOut = false;
+    let termination = null;
+    let inputError = null;
     let forceKillTimer;
-
     const commandResult = (code, signal) => ({
-      command,
-      args,
-      code,
-      signal,
-      stdout: stdoutCapture.text(),
-      stderr: stderrCapture.text(),
+      command, args, code, signal,
+      stdout: stdoutCapture.text(), stderr: stderrCapture.text(),
       stdoutTruncated: stdoutCapture.truncated,
       stderrTruncated: stderrCapture.truncated,
       elapsedMs: Date.now() - startedAt
     });
-
-    const timer = setTimeout(() => {
-      if (settled) {
-        return;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearTimeout(forceKillTimer);
+      options.signal?.removeEventListener("abort", onAbort);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const terminationError = (code, signal) => new LlmRouterError(
+      termination === "cancelled" ? "operation cancelled"
+        : termination === "input" ? `failed to write command input: ${command}`
+        : `command timed out after ${timeoutMs}ms`,
+      {
+        ...commandResult(code, signal),
+        code: termination === "cancelled" ? "ERR_CANCELLED"
+          : termination === "input" ? "ERR_COMMAND_INPUT" : code,
+        ...(inputError ? { cause: inputError.message } : {}),
+        cancelled: termination === "cancelled",
+        timedOut: termination === "timeout"
       }
-      timedOut = true;
+    );
+    const terminate = (reason) => {
+      if (settled || termination) return;
+      termination = reason;
+      clearTimeout(timer);
       killChild(child, "SIGTERM", options.killProcessGroup === true);
+      // A leader can exit while TERM-resistant descendants with independent
+      // stdio remain. Keep group escalation alive until KILL, even after close.
       forceKillTimer = setTimeout(() => {
         killChild(child, "SIGKILL", options.killProcessGroup === true);
         child.stdin.destroy();
         child.stdout.destroy();
         child.stderr.destroy();
-        if (!settled) {
-          settled = true;
-          reject(
-            new LlmRouterError(`command timed out after ${timeoutMs}ms`, {
-              ...commandResult(null, "SIGKILL"),
-              timedOut: true,
-              forced: true
-            })
-          );
-        }
+        finish(terminationError(null, "SIGKILL"));
       }, 1000);
-      forceKillTimer.unref?.();
-    }, timeoutMs);
-
-    child.stdout.on("data", (chunk) => {
-      stdoutCapture.append(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderrCapture.append(chunk);
-    });
+    };
+    const onAbort = () => terminate("cancelled");
+    const timer = setTimeout(() => terminate("timeout"), timeoutMs);
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) onAbort();
+    child.stdout.on("data", (chunk) => stdoutCapture.append(chunk));
+    child.stderr.on("data", (chunk) => stderrCapture.append(chunk));
     child.stdin.on("error", (error) => {
-      if (["EPIPE", "ERR_STREAM_DESTROYED"].includes(error?.code)) {
-        return;
-      }
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      clearTimeout(forceKillTimer);
-      killChild(child, "SIGTERM", options.killProcessGroup === true);
-      reject(
-        new LlmRouterError(`failed to write command input: ${command}`, {
-          command,
-          cause: error.message
-        })
-      );
+      if (["EPIPE", "ERR_STREAM_DESTROYED"].includes(error?.code) || settled) return;
+      inputError = error;
+      terminate("input");
     });
     child.on("error", (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      clearTimeout(forceKillTimer);
-      reject(
-        new LlmRouterError(`failed to run command: ${command}`, {
-          command,
-          args,
-          cause: error.message
-        })
-      );
+      finish(new LlmRouterError(`failed to run command: ${command}`, {
+        command, args, cause: error.message
+      }));
     });
     child.on("close", (code, signal) => {
-      if (settled) {
+      if (settled) return;
+      if (termination) {
+        if (options.killProcessGroup !== true || process.platform === "win32") {
+          finish(terminationError(code, signal));
+        }
         return;
       }
-      settled = true;
-      clearTimeout(timer);
-      clearTimeout(forceKillTimer);
       const result = commandResult(code, signal);
-      if (timedOut) {
-        reject(
-          new LlmRouterError(`command timed out after ${timeoutMs}ms`, {
-            ...result,
-            timedOut: true
-          })
-        );
-        return;
-      }
       if (code !== 0 && !options.allowFailure) {
-        reject(
-          new LlmRouterError(`command failed: ${command} ${args.join(" ")}`, {
-            ...result
-          })
-        );
-        return;
-      }
-      resolve(result);
+        finish(new LlmRouterError(`command failed: ${command} ${args.join(" ")}`, result));
+      } else finish(null, result);
     });
-
     try {
       child.stdin.end(options.input);
     } catch (error) {
-      if (!["EPIPE", "ERR_STREAM_DESTROYED"].includes(error?.code)) {
-        child.stdin.emit("error", error);
-      }
+      if (!["EPIPE", "ERR_STREAM_DESTROYED"].includes(error?.code)) child.stdin.emit("error", error);
     }
   });
 }
@@ -575,11 +553,21 @@ async function cleanupTmuxSocketIfEmpty(stateDir) {
 export async function hasSession(options = {}) {
   const sessionName = resolveSessionName(options.provider, options.sessionName);
   validateSessionName(sessionName);
-  const result = await runTmux(["has-session", "-t", exactTmuxTarget(sessionName)], {
-    allowFailure: true,
-    timeoutMs: 5000,
-    stateDir: options.stateDir
-  });
+  let result;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    result = await runTmux(["has-session", "-t", exactTmuxTarget(sessionName)], {
+      allowFailure: true,
+      timeoutMs: 5000,
+      stateDir: options.stateDir
+    });
+    // tmux can close its last-session server while a lookup connects. Retry
+    // the transient disconnect, rather than misreporting stop as a failure.
+    if (result.code !== 0 && /server exited unexpectedly/i.test(result.stderr) && attempt < 2) {
+      await sleep(25);
+      continue;
+    }
+    break;
+  }
   if (result.code === 0) return true;
   if (isTmuxAbsentResult(result)) return false;
   throw new LlmRouterError("tmux session lookup failed", {
@@ -590,6 +578,7 @@ export async function hasSession(options = {}) {
 }
 
 export async function killSession(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const sessionName = resolveSessionName(options.provider, options.sessionName);
   validateSessionName(sessionName);
@@ -597,6 +586,7 @@ export async function killSession(options = {}) {
   const paths = await sessionStatePaths({ provider, sessionName, stateDir });
   const releaseLaunchLock = await acquireDirectoryLock(paths.launchLockPath, {
     timeoutMs: 10000,
+    signal: options.signal,
     wait: true,
     metadata: { provider, sessionName, kind: "launch" }
   });
@@ -606,15 +596,19 @@ export async function killSession(options = {}) {
       path.join(capacityDir, ".capacity-lock"),
       {
         timeoutMs: 10000,
+        signal: options.signal,
         wait: true,
         metadata: { kind: "capacity" }
       }
     );
     try {
+      let stopTarget = exactTmuxTarget(sessionName);
       if (options.requireOwned) {
         if (await hasSession({ provider, sessionName, stateDir })) {
           const metadata = await readSessionMetadata(paths.metadataPath);
-          if (!isStartingSessionMetadata(metadata, provider, sessionName)) {
+          if (isStartingSessionMetadata(metadata, provider, sessionName)) {
+            stopTarget = await assertRecoverableLaunchOwnership(metadata, stateDir);
+          } else {
             await verifyOwnedSession({
               provider,
               sessionName,
@@ -633,7 +627,10 @@ export async function killSession(options = {}) {
           }
         }
       }
-      const result = await runTmux(["kill-session", "-t", exactTmuxTarget(sessionName)], {
+      // Cancellation is honored until the stop commits. Once kill is sent,
+      // complete cleanup without cancellation to avoid half-removed state.
+      throwIfAborted(options.signal);
+      const result = await runTmux(["kill-session", "-t", stopTarget], {
         allowFailure: true,
         timeoutMs: 5000,
         stateDir
@@ -668,6 +665,10 @@ export async function killSession(options = {}) {
 }
 
 export async function ensureSession(options = {}) {
+  throwIfAborted(options.signal);
+  const timeoutMs = normalizeTimeout(options.timeoutMs, DEFAULT_READY_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
+  readinessTimeoutBudget(timeoutMs);
   const provider = normalizeProvider(options.provider);
   const config = providerConfig(provider);
   const sessionName = resolveSessionName(provider, options.sessionName);
@@ -677,7 +678,6 @@ export async function ensureSession(options = {}) {
     process.env[`LLM_ROUTER_MCP_${config.envName}_CWD`] ||
     (await ensureDefaultWorkDir(provider, stateDir));
   const cwd = await canonicalDirectory(requestedCwd, "provider cwd");
-  const timeoutMs = normalizeTimeout(options.timeoutMs, DEFAULT_READY_TIMEOUT_MS);
   const columns = normalizeDimension(options.columns, DEFAULT_COLUMNS);
   const rows = normalizeDimension(options.rows, DEFAULT_ROWS);
   const directModel = resolveProviderModel(provider, options.model);
@@ -722,6 +722,7 @@ export async function ensureSession(options = {}) {
     provider,
     cwd,
     command: canonicalExecutable || launcher.command,
+    wrapperFingerprints: launcher.wrapperFingerprints || [],
     executableFingerprint: canonicalExecutable
       ? await executableFingerprint(canonicalExecutable)
       : null,
@@ -743,20 +744,23 @@ export async function ensureSession(options = {}) {
   validateSessionName(sessionName);
   await tmuxVersion();
   const releaseLaunchLock = await acquireDirectoryLock(sessionPaths.launchLockPath, {
-    timeoutMs,
+    timeoutMs: remainingTimeout(deadline),
+    signal: options.signal,
     wait: true,
     metadata: { provider, sessionName, kind: "launch" }
   });
 
   try {
+    throwIfAborted(options.signal);
     if (await hasSession({ provider, sessionName, stateDir })) {
       const metadata = await readSessionMetadata(sessionPaths.metadataPath);
       if (isStartingSessionMetadata(metadata, provider, sessionName)) {
+        const recoveringId = await assertRecoverableLaunchOwnership(metadata, stateDir);
         // A prior router process can die after tmux creates the session but
         // before readiness metadata is finalized. The launch intent is written
         // before new-session, so after acquiring the abandoned launch lock this
         // exact session is safe to remove and recreate.
-        await runTmux(["kill-session", "-t", exactTmuxTarget(sessionName)], {
+        await runTmux(["kill-session", "-t", recoveringId], {
           allowFailure: true,
           timeoutMs: 5000,
           stateDir
@@ -795,7 +799,8 @@ export async function ensureSession(options = {}) {
           sessionName,
           paneId: metadata.paneId,
           stateDir,
-          timeoutMs: readinessTimeoutBudget(timeoutMs),
+          timeoutMs: remainingTimeout(deadline),
+          signal: options.signal,
           detectStartupInteraction: false
         });
         return {
@@ -833,15 +838,23 @@ export async function ensureSession(options = {}) {
     const releaseCapacityLock = await acquireDirectoryLock(
       path.join(capacityDir, ".capacity-lock"),
       {
-        timeoutMs,
+        timeoutMs: remainingTimeout(deadline),
+        signal: options.signal,
         wait: true,
         metadata: { kind: "capacity" }
       }
     );
     try {
+      throwIfAborted(options.signal);
       await assertSessionCapacity(stateDir);
+      const ownerToken = crypto.randomUUID();
       const args = [
         "new-session",
+        "-e",
+        `LLM_ROUTER_MCP_OWNER=${ownerToken}`,
+        "-P",
+        "-F",
+        "#{session_id}",
         "-d",
         "-x",
         String(columns),
@@ -853,7 +866,6 @@ export async function ensureSession(options = {}) {
         cwd,
         command
       ];
-      const ownerToken = crypto.randomUUID();
       const metadata = {
         protocolVersion: 2,
         provider,
@@ -867,6 +879,8 @@ export async function ensureSession(options = {}) {
         creatorPid: process.pid,
         createdAt: new Date().toISOString()
       };
+      let createdSessionId = null;
+      let creationAttempted = false;
       try {
         // Persist launch intent first. A hard crash after tmux new-session can
         // then be distinguished from an unrelated session and recovered by the
@@ -875,13 +889,19 @@ export async function ensureSession(options = {}) {
           stateDir,
           requireWithinState: true
         });
-        await runTmux(args, { timeoutMs, stateDir });
+        throwIfAborted(options.signal);
+        const creationTimeoutMs = remainingTimeout(deadline);
+        creationAttempted = true;
+        const createdSession = await runTmux(args, { timeoutMs: creationTimeoutMs, stateDir });
+        createdSessionId = createdSession.stdout.trim();
+        if (!/^\$\d+$/.test(createdSessionId)) {
+          throw new LlmRouterError("tmux did not return a created session identity");
+        }
 
-        const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
           if (await hasSession({ provider, sessionName, stateDir })) {
             const pane = await runTmux(
-              ["display-message", "-p", "-t", exactTmuxPaneTarget(sessionName), "#{pane_id}"],
+              ["display-message", "-p", "-t", createdSessionId, "#{pane_id}"],
               { timeoutMs: 5000, stateDir }
             );
             await runTmux(
@@ -889,7 +909,7 @@ export async function ensureSession(options = {}) {
                 "set-option",
                 "-q",
                 "-t",
-                exactTmuxPaneTarget(sessionName),
+                createdSessionId,
                 "@llm_router_owner",
                 ownerToken
               ],
@@ -906,8 +926,9 @@ export async function ensureSession(options = {}) {
               provider,
               sessionName,
               paneId: metadata.paneId,
-              timeoutMs: readinessTimeoutBudget(timeoutMs),
+              timeoutMs: remainingTimeout(deadline),
               stateDir,
+              signal: options.signal,
               detectStartupInteraction: true
             });
             metadata.ready = true;
@@ -950,15 +971,46 @@ export async function ensureSession(options = {}) {
           timeoutMs
         });
       } catch (error) {
-        await runTmux(["kill-session", "-t", exactTmuxTarget(sessionName)], {
-          allowFailure: true,
-          timeoutMs: 5000,
-          stateDir
-        });
-        await Promise.all([
-          fs.rm(sessionPaths.metadataPath, { force: true }),
-          fs.rm(sessionPaths.busyLockPath, { recursive: true, force: true })
-        ]);
+        // new-session can create and print an ID before its client times out.
+        // Verify the creation-time token, rather than treating a rejected await
+        // as proof that nothing was created or killing by name alone.
+        const partialId = !error?.details?.stdoutTruncated &&
+          typeof error?.details?.stdout === "string" ? error.details.stdout.trim() : "";
+        const candidate = createdSessionId || (/^\$\d+$/.test(partialId) ? partialId : null);
+        let cleanupConfirmed = !creationAttempted;
+        if (creationAttempted) {
+          try {
+            const ownedId = await ownedLaunchSessionId({
+              stateDir, sessionName, ownerToken, sessionId: candidate
+            });
+            if (ownedId) {
+              await runTmux(["kill-session", "-t", ownedId], {
+                allowFailure: true, timeoutMs: 5000, stateDir
+              });
+              cleanupConfirmed = !(await ownedLaunchSessionId({
+                stateDir, sessionName, ownerToken, sessionId: ownedId
+              }));
+            } else {
+              // A definite CLI rejection (including duplicate names) created
+              // nothing owned by this attempt. A timeout is ambiguous: retain
+              // recoverable intent if no trustworthy identity is available.
+              cleanupConfirmed = Number.isInteger(error?.details?.code) &&
+                error.details.code !== 0 && !error.details.timedOut;
+            }
+          } catch {
+            // Failed cleanup/probes must not erase the only recovery record.
+          }
+        }
+        if (cleanupConfirmed) {
+          await Promise.all([
+            fs.rm(sessionPaths.metadataPath, { force: true }),
+            fs.rm(sessionPaths.busyLockPath, { recursive: true, force: true })
+          ]);
+        } else {
+          await writeJsonAtomic(sessionPaths.metadataPath, {
+            ...metadata, status: "starting", ready: false, creationUncertain: true
+          }, { stateDir, requireWithinState: true });
+        }
         throw error;
       }
     } finally {
@@ -970,6 +1022,7 @@ export async function ensureSession(options = {}) {
 }
 
 export async function capturePane(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const sessionName = resolveSessionName(provider, options.sessionName);
   const lines = Math.min(
@@ -996,6 +1049,7 @@ export async function capturePane(options = {}) {
 }
 
 export async function writeInputFile(options = {}) {
+  throwIfAborted(options.signal);
   const provider = options.provider ? normalizeProvider(options.provider) : "shared";
   const markdown = options.markdown;
   if (typeof markdown !== "string" || markdown.length === 0) {
@@ -1028,6 +1082,7 @@ export async function writeInputFile(options = {}) {
 }
 
 export async function sendInput(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const sessionName = resolveSessionName(provider, options.sessionName);
   const stateDir = await ensureStateRoot(options.stateDir);
@@ -1062,17 +1117,21 @@ export async function sendInput(options = {}) {
     columns: options.columns,
     rows: options.rows,
     model: options.model,
+    signal: options.signal,
     allowUnverifiedLauncher: options.allowUnverifiedLauncher
   });
   const sessionPaths = await sessionStatePaths({ provider, sessionName, stateDir });
   const releaseLaunchLock = await acquireDirectoryLock(sessionPaths.launchLockPath, {
     timeoutMs,
+    signal: options.signal,
     wait: true,
     metadata: { provider, sessionName, kind: "launch" }
   });
   let busyLockAcquired = false;
+  let dispatchStarted = false;
 
   try {
+    throwIfAborted(options.signal);
     const current = await verifyOwnedSession({ provider, sessionName, stateDir });
     if (
       stableHash(current.ownerToken) !== session.sessionGeneration ||
@@ -1135,6 +1194,10 @@ export async function sendInput(options = {}) {
       requireWithinState: true
     });
 
+    throwIfAborted(options.signal);
+    // Commit transport atomically with respect to cancellation. Once dispatch
+    // starts, retain the request lock even if delivery becomes uncertain.
+    dispatchStarted = true;
     await sendFileReferenceToTmux({
       sessionName,
       paneId: session.paneId,
@@ -1158,7 +1221,7 @@ export async function sendInput(options = {}) {
       sentAt: new Date().toISOString()
     };
   } catch (error) {
-    if (busyLockAcquired) {
+    if (busyLockAcquired && !dispatchStarted) {
       await forceReleaseRequestBusyLock(sessionPaths.busyLockPath, requestId);
     }
     throw error;
@@ -1168,6 +1231,7 @@ export async function sendInput(options = {}) {
 }
 
 export async function waitForResponse(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const sessionName = resolveSessionName(provider, options.sessionName);
   const timeoutMs = normalizeTimeout(options.timeoutMs, DEFAULT_TIMEOUT_MS);
@@ -1205,7 +1269,8 @@ export async function waitForResponse(options = {}) {
       requestMetadata,
       sessionPaths,
       requestId,
-      timeoutMs
+      timeoutMs,
+      signal: options.signal
     });
     return completedWaitResult({
       provider,
@@ -1239,6 +1304,7 @@ export async function waitForResponse(options = {}) {
   validateSessionName(sessionName);
 
   while (Date.now() <= deadline) {
+    throwIfAborted(options.signal);
     const fileResult = await readCompletedFileTransaction({
       provider,
       sessionName,
@@ -1257,7 +1323,8 @@ export async function waitForResponse(options = {}) {
         requestMetadata,
         sessionPaths,
         requestId,
-        timeoutMs
+        timeoutMs,
+        signal: options.signal
       });
       return completedWaitResult({
         provider,
@@ -1386,7 +1453,7 @@ export async function waitForResponse(options = {}) {
       }
     }
 
-    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())), options.signal);
   }
 
   const fallbackPath = await writeFallbackFile({
@@ -1421,6 +1488,7 @@ export async function waitForResponse(options = {}) {
 }
 
 export async function waitForStart(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const sessionName = resolveSessionName(provider, options.sessionName);
   const timeoutMs = normalizeTimeout(options.timeoutMs, 30000);
@@ -1481,6 +1549,7 @@ export async function waitForStart(options = {}) {
   validateSessionName(sessionName);
 
   while (Date.now() <= deadline) {
+    throwIfAborted(options.signal);
     const fileResult = await readCompletedFileTransaction({
       provider,
       sessionName,
@@ -1532,7 +1601,7 @@ export async function waitForStart(options = {}) {
       };
     }
 
-    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())), options.signal);
   }
 
   return {
@@ -1569,12 +1638,14 @@ export async function tmuxAsk(options = {}) {
     timeoutMs: remainingMs,
     pollMs: options.pollMs,
     captureLines: options.captureLines,
+    signal: options.signal,
     stateDir: options.stateDir
   });
   return { ...sent, ...waited, mode: "tmux" };
 }
 
 export async function headlessAsk(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const releaseHeadlessSlot = acquireHeadlessSlot(provider);
   try {
@@ -1653,7 +1724,8 @@ async function headlessAskWithSlot(options, provider) {
     promptPath,
     cwd,
     timeoutMs,
-    allowUnverifiedLauncher: options.allowUnverifiedLauncher
+    allowUnverifiedLauncher: options.allowUnverifiedLauncher,
+    signal: options.signal
   });
 
   const raw = await writeRawResponseFile({
@@ -1716,6 +1788,7 @@ async function headlessAskWithSlot(options, provider) {
 }
 
 export async function status(options = {}) {
+  throwIfAborted(options.signal);
   const provider = normalizeProvider(options.provider);
   const sessionName = resolveSessionName(provider, options.sessionName);
   const stateDir = await ensureStateRoot(options.stateDir);
@@ -1779,6 +1852,21 @@ export async function status(options = {}) {
   }
 
   const busy = await pathExists(sessionPaths.busyLockPath);
+  let activeRequest = null;
+  if (busy) {
+    try {
+      const owner = await readJsonFile(path.join(sessionPaths.busyLockPath, "owner.json"), {
+        stateDir, requireWithinState: true
+      });
+      if (
+        owner.kind === "request" && owner.provider === provider && owner.sessionName === sessionName &&
+        typeof owner.nonce === "string" && /^[A-Za-z0-9_.:-]{6,96}$/.test(owner.nonce) &&
+        owner.requestId === requestIdForNonce(provider, owner.nonce)
+      ) activeRequest = { nonce: owner.nonce, requestId: owner.requestId };
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
   const exposePaneTail =
     options.includePaneTail === true || process.env.LLM_ROUTER_MCP_ENABLE_DEBUG_TOOLS === "1";
 
@@ -1787,6 +1875,7 @@ export async function status(options = {}) {
     sessionName,
     running,
     busy,
+    activeRequest,
     markerStatus,
     paneTail: exposePaneTail ? paneTail : null
   };
@@ -1865,7 +1954,8 @@ async function runHeadlessProvider({
   promptPath,
   cwd,
   timeoutMs,
-  allowUnverifiedLauncher
+  allowUnverifiedLauncher,
+  signal
 }) {
   const config = providerConfig(provider);
   const modeArgs = config.headlessModeArgs(promptPath, timeoutMs);
@@ -1887,7 +1977,8 @@ async function runHeadlessProvider({
     input,
     timeoutMs,
     allowFailure: true,
-    killProcessGroup: true
+    killProcessGroup: true,
+    signal
   });
   return {
     ...run,
@@ -1993,11 +2084,12 @@ function requestIdForNonce(provider, nonce) {
 
 async function sessionStatePaths({ provider, sessionName, stateDir }) {
   const directory = await ensureStateSubdir(stateDir, "sessions", normalizeProvider(provider));
+  const lockDirectory = await ensureStateSubdir(stateDir, "sessions", "launch-locks");
   validateSessionName(sessionName);
   return {
     directory,
     metadataPath: path.join(directory, `${sessionName}.json`),
-    launchLockPath: path.join(directory, `${sessionName}.launch-lock`),
+    launchLockPath: path.join(lockDirectory, `${sessionName}.launch-lock`),
     busyLockPath: path.join(directory, `${sessionName}.busy-lock`)
   };
 }
@@ -2027,6 +2119,49 @@ function isStartingSessionMetadata(metadata, provider, sessionName) {
       metadata.launchSpecHash.length >= 16 &&
       Number.isSafeInteger(metadata.creatorPid)
   );
+}
+
+// The environment is attached by new-session itself, before a wrapper/client
+// can time out. It permits safe recovery even if no creation ID reached us.
+async function ownedLaunchSessionId({ stateDir, sessionName, ownerToken, sessionId }) {
+  // Resolve the mutable name first, then authorize and operate only on that
+  // captured ID. A same-name replacement must never inherit the old token.
+  let id = sessionId;
+  if (!id) {
+    const identity = await runTmux(
+      ["display-message", "-p", "-t", exactTmuxPaneTarget(sessionName), "#{session_id}"],
+      { allowFailure: true, timeoutMs: 5000, stateDir }
+    );
+    if (identity.code !== 0 && isTmuxAbsentResult(identity)) return null;
+    id = identity.stdout.trim();
+    if (identity.code !== 0 || !/^\$\d+$/.test(id)) {
+      throw new LlmRouterError("could not resolve tmux launch identity", { code: "ERR_LAUNCH_RECOVERY" });
+    }
+  }
+  if (!/^\$\d+$/.test(id)) {
+    throw new LlmRouterError("invalid tmux launch identity", { code: "ERR_LAUNCH_RECOVERY" });
+  }
+  const owner = await runTmux(
+    ["show-environment", "-t", id, "LLM_ROUTER_MCP_OWNER"],
+    { allowFailure: true, timeoutMs: 5000, stateDir }
+  );
+  if (owner.code !== 0) {
+    if (isTmuxAbsentResult(owner) || /unknown variable/i.test(owner.stderr)) return null;
+    throw new LlmRouterError("could not verify tmux launch ownership", { code: "ERR_LAUNCH_RECOVERY" });
+  }
+  return owner.stdout.trim() === `LLM_ROUTER_MCP_OWNER=${ownerToken}` ? id : null;
+}
+
+async function assertRecoverableLaunchOwnership(metadata, stateDir) {
+  const sessionId = await ownedLaunchSessionId({
+    stateDir, sessionName: metadata.sessionName, ownerToken: metadata.ownerToken
+  });
+  if (!sessionId) {
+    throw new LlmRouterError("starting launch does not own this tmux session", {
+      code: "ERR_SESSION_NOT_OWNED", provider: metadata.provider, sessionName: metadata.sessionName
+    });
+  }
+  return sessionId;
 }
 
 async function verifyOwnedSession({ provider, sessionName, stateDir, metadata }) {
@@ -2161,11 +2296,13 @@ function normalizeConcurrencyLimit(value, fallback, name) {
 }
 
 async function acquireDirectoryLock(lockPath, options = {}) {
+  throwIfAborted(options.signal);
   const timeoutMs = normalizeTimeout(options.timeoutMs, 5000);
   const deadline = Date.now() + timeoutMs;
   const token = crypto.randomUUID();
 
   while (true) {
+    throwIfAborted(options.signal);
     try {
       await fs.mkdir(lockPath, { mode: 0o700 });
       await writeJsonAtomic(path.join(lockPath, "owner.json"), {
@@ -2197,7 +2334,7 @@ async function acquireDirectoryLock(lockPath, options = {}) {
           timeoutMs
         });
       }
-      await sleep(Math.min(100, Math.max(1, deadline - Date.now())));
+      await sleep(Math.min(100, Math.max(1, deadline - Date.now())), options.signal);
     }
   }
 }
@@ -2452,7 +2589,8 @@ async function waitForPaneReadiness({
   paneId,
   stateDir,
   timeoutMs,
-  detectStartupInteraction
+  detectStartupInteraction,
+  signal
 }) {
   const deadline = Date.now() + normalizeTimeout(timeoutMs, DEFAULT_READY_TIMEOUT_MS);
   const settleMs = readySettleMs();
@@ -2460,6 +2598,7 @@ async function waitForPaneReadiness({
   let stableSince = null;
   let previousPane = null;
   while (Date.now() <= deadline) {
+    throwIfAborted(signal);
     if (!(await hasSession({ provider, sessionName, stateDir }))) {
       throw new LlmRouterError("provider process exited before its tmux pane became ready", {
         code: "ERR_PROVIDER_STARTUP_EXITED",
@@ -2508,7 +2647,7 @@ async function waitForPaneReadiness({
         return true;
       }
     }
-    await sleep(100);
+    await sleep(100, signal);
   }
   throw new LlmRouterError("provider tmux pane did not show readiness output before timeout", {
     code: "ERR_PROVIDER_NOT_READY",
@@ -2554,7 +2693,7 @@ function readinessTimeoutBudget(totalTimeoutMs) {
       }
     );
   }
-  return Math.min(totalTimeoutMs, settleMs + 3000);
+  return totalTimeoutMs;
 }
 
 async function waitForPaneQuiet({
@@ -2563,12 +2702,14 @@ async function waitForPaneQuiet({
   paneId,
   stateDir,
   timeoutMs,
-  quietMs
+  quietMs,
+  signal
 }) {
   const deadline = Date.now() + normalizeTimeout(timeoutMs, 5000);
   let previous = null;
   let unchangedSince = null;
   while (Date.now() <= deadline) {
+    throwIfAborted(signal);
     if (!(await hasSession({ provider, sessionName, stateDir }))) {
       return true;
     }
@@ -2587,7 +2728,7 @@ async function waitForPaneQuiet({
       previous = pane;
       unchangedSince = Date.now();
     }
-    await sleep(100);
+    await sleep(100, signal);
   }
   return false;
 }
@@ -2695,16 +2836,21 @@ async function settleCompletedSession({
   requestMetadata,
   sessionPaths,
   requestId,
-  timeoutMs
+  timeoutMs,
+  signal
 }) {
+  throwIfAborted(signal);
   const releaseLaunchLock = await acquireDirectoryLock(sessionPaths.launchLockPath, {
     timeoutMs,
+    signal,
     wait: true,
     metadata: { provider, sessionName, kind: "launch" }
   });
   try {
+    throwIfAborted(signal);
     const running = await hasSession({ provider, sessionName, stateDir });
     if (!running) {
+      throwIfAborted(signal);
       const released = await forceReleaseRequestBusyLock(
         sessionPaths.busyLockPath,
         requestId
@@ -2729,11 +2875,13 @@ async function settleCompletedSession({
       paneId: sessionMetadata.paneId,
       stateDir,
       timeoutMs: Math.min(5000, timeoutMs),
+      signal,
       quietMs: 600
     });
     if (!paneQuiet) {
       return { sessionIdle: false, sessionEnded: false, ownershipMismatch: false };
     }
+    throwIfAborted(signal);
     const released = await forceReleaseRequestBusyLock(
       sessionPaths.busyLockPath,
       requestId
@@ -3108,6 +3256,35 @@ function durationForAgy(timeoutMs) {
   return `${seconds}s`;
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function remainingTimeout(deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining < 1) {
+    throw new LlmRouterError("session startup exhausted its end-to-end timeout", {
+      code: "ERR_SESSION_START_TIMEOUT", timedOut: true
+    });
+  }
+  return remaining;
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) {
+    throw new LlmRouterError("operation cancelled", { code: "ERR_CANCELLED", cancelled: true });
+  }
+}
+
+function sleep(ms, signal) {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      reject(new LlmRouterError("operation cancelled", { code: "ERR_CANCELLED", cancelled: true }));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
 }

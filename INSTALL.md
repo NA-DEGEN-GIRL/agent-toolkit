@@ -29,6 +29,7 @@ For the shared packages, `<agent-home>` is `${CODEX_HOME:-$HOME/.codex}` for Cod
 - Existing same-name packages are moved to `<agent-home>/skill-backups/<name>/<timestamp>/payload`, outside the `skills/` discovery tree. Do not put backups beside live packages: resolvers may rediscover their `SKILL.md` and create duplicate routing.
 - Package trees containing symlinks or special files are rejected; installable payloads must contain only real directories and regular files.
 - Mutating install/rollback operations take a fixed per-agent/per-skill advisory lock under `<agent-home>/skill-locks/`, independent of any backup-root override.
+- Installs prepare and validate the staged package before moving the live destination. Handled cancellation (Ctrl-C/SIGTERM) attempts recovery using mutation state registered before each move. SIGKILL/power loss cannot be caught; an interrupted cross-filesystem backup may require manual recovery from the reported preserved entries.
 - Do not replace a default package named `handoff`. Install these variants as `codex-handoff` or `claude-handoff` unless the user explicitly requests a different migration.
 - `design-repo-subagents` and `write-agents-md` intentionally use common existing names. Replace them only when the user explicitly requested that package; the installer backs up the old destination first.
 - Do not edit installed global skills merely because this repository was opened. Installation must match the user's explicit target agent and package request.

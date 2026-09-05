@@ -7,6 +7,10 @@ import sys
 import tempfile
 import stat
 from pathlib import Path
+from unittest import mock
+
+import apply_marker_block as marker
+from snapshot_common import open_directory_handle
 
 SCRIPT = Path(__file__).with_name("apply_marker_block.py")
 BLOCK1 = """<!-- BEGIN handoff-rule -->
@@ -30,7 +34,105 @@ def run(cmd: list[str], input_text: str | None = None, check_result: bool = True
     return subprocess.run(cmd, input=input_text, text=True, capture_output=True, check=check_result)
 
 
+def test_exchange_rechecks_displaced_content() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        target = root / "AGENTS.md"
+        target.write_text("original\n")
+        with open_directory_handle(root, root) as handle:
+            original, mode, token = marker.read_text(handle, target.name)
+            updated, _ = marker.apply_block(original, BLOCK1, marker.DEFAULT_BEGIN, marker.DEFAULT_END)
+            real_exchange = marker.rename_exchange_at
+            calls = 0
+
+            def concurrent_edit(fd: int, left: str, right: str) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    target.write_text("unrelated concurrent user edit\n")
+                real_exchange(fd, left, right)
+
+            with mock.patch.object(marker, "rename_exchange_at", side_effect=concurrent_edit):
+                try:
+                    marker.atomic_write(handle, target.name, updated, mode, token)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("concurrent edit must report a conflict")
+        check(target.read_text() == "unrelated concurrent user edit\n", "exchange lost the concurrent edit")
+        check(not list(root.glob(".*.tmp")), "successful restoration left unnecessary recovery files")
+
+
+def test_second_writer_during_rollback_is_preserved() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        target = root / "AGENTS.md"
+        target.write_text("original\n")
+        with open_directory_handle(root, root) as handle:
+            _, mode, token = marker.read_text(handle, target.name)
+            real_exchange = marker.rename_exchange_at
+            calls = 0
+
+            def racing_rollback(fd: int, left: str, right: str) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    target.write_text("first concurrent edit\n")
+                elif calls == 2:
+                    # Modify our inode in place immediately before rollback:
+                    # checking inode identity alone would delete this edit.
+                    target.write_text("later concurrent edit\n")
+                real_exchange(fd, left, right)
+
+            with mock.patch.object(marker, "rename_exchange_at", side_effect=racing_rollback):
+                try:
+                    marker.atomic_write(handle, target.name, "our marker update\n", mode, token)
+                except ValueError as exc:
+                    check("preserved" in str(exc), "unrestored conflict must identify recovery state")
+                else:
+                    raise AssertionError("racing rollback must report a conflict")
+        check(target.read_text() == "later concurrent edit\n", "later writer did not retain its pathname")
+        backups = list(root.glob(".*.tmp"))
+        check(len(backups) == 1 and backups[0].read_text() == "first concurrent edit\n", "displaced edit was not retained")
+
+
+def test_first_create_does_not_clobber_and_exchange_unavailable_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        target = root / "AGENTS.md"
+        with open_directory_handle(root, root) as handle:
+            real_link = marker.os.link
+
+            def concurrent_create(*args: object, **kwargs: object) -> None:
+                target.write_text("concurrent first file\n")
+                real_link(*args, **kwargs)
+
+            with mock.patch.object(marker.os, "link", side_effect=concurrent_create):
+                try:
+                    marker.atomic_write(handle, target.name, BLOCK1, None, None)
+                except FileExistsError:
+                    pass
+                else:
+                    raise AssertionError("first-create race must fail without overwrite")
+            check(target.read_text() == "concurrent first file\n", "first-create race lost user content")
+            _, mode, token = marker.read_text(handle, target.name)
+            with mock.patch.object(marker, "rename_exchange_available", return_value=False):
+                try:
+                    marker.atomic_write(handle, target.name, BLOCK1, mode, token)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("missing exchange must fail closed")
+            check(target.read_text() == "concurrent first file\n", "unsupported exchange mutated target")
+            check(not list(root.glob(".*.tmp")), "failed first-create left a temporary file")
+
+
 def main() -> int:
+    test_exchange_rechecks_displaced_content()
+    test_second_writer_during_rollback_is_preserved()
+    test_first_create_does_not_clobber_and_exchange_unavailable_fails_closed()
+    repeated, _ = marker.apply_block(BLOCK1, BLOCK1, marker.DEFAULT_BEGIN, marker.DEFAULT_END)
+    check(repeated == BLOCK1, "marker at start of file must be byte-idempotent")
     with tempfile.TemporaryDirectory() as td:
         target = Path(td) / "CODEX.md"
         target.write_text("# Existing\n", encoding="utf-8")

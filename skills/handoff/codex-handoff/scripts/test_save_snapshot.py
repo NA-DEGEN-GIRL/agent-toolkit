@@ -418,7 +418,7 @@ def test_integrated_retention_preserves_racing_replacement() -> None:
         check(bool(preserved), "racing replacement was deleted by integrated retention")
 
 
-def test_writer_racing_rollback_is_preserved() -> None:
+def test_writer_racing_rollback_is_preserved(inplace: bool = False) -> None:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         run_save(root, snapshot(goal="A"), "--timestamp", "2026-07-09-000001")
@@ -445,7 +445,10 @@ def test_writer_racing_rollback_is_preserved() -> None:
             if exchange_count == 1:
                 replace_latest(directory_fd, writer_b, ".writer-b.tmp")
             elif exchange_count == 2:
-                replace_latest(directory_fd, writer_c, ".writer-c.tmp")
+                if inplace:
+                    latest.write_bytes(writer_c)
+                else:
+                    replace_latest(directory_fd, writer_c, ".writer-c.tmp")
             original_exchange(directory_fd, left, right)
 
         argv = [
@@ -505,6 +508,7 @@ def main() -> int:
     test_partial_retention_failure_reports_persisted_state()
     test_integrated_retention_preserves_racing_replacement()
     test_writer_racing_rollback_is_preserved()
+    test_writer_racing_rollback_is_preserved(inplace=True)
     test_lane_swap_never_redirects_writes()
     print("save_snapshot.py safety tests passed")
     return 0
