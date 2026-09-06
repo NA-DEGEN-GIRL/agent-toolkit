@@ -1,0 +1,6 @@
+{
+  "files": {
+    "repo/README.md": "# Report Formatter\nCurrent decision: empty reports produce an empty string.\nImplementation is pending; define tests for empty and non-empty reports first.\n"
+  },
+  "symlinks": {}
+}

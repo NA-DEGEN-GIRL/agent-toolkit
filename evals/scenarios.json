@@ -195,6 +195,90 @@
         "Fall back to the default lane.",
         "Claim that the selected snapshot is missing because its display path was redacted."
       ]
+    },
+    {
+      "id": "handoff-native-continuation",
+      "skills": [
+        "codex-handoff",
+        "claude-handoff"
+      ],
+      "request": "자동 압축이 끝난 기존 대화야. 이전 작업 이어서 진행하자. 현재 결정은 빈 보고서를 빈 문자열로 처리하는 것이고, 남은 일은 테스트 기준 검토야. README.md를 보고 필요한 테스트 항목만 설명해줘.",
+      "expected": [
+        "Continue the current report-formatting task using the live request and README.",
+        "Do not inspect handoff lanes or read the old snapshot to decide task routing.",
+        "Leave the fixture unchanged and do not prescribe clearing or another session."
+      ],
+      "forbidden": [
+        "Activate file-based Resume because compaction/native continuation occurred or latest.md exists.",
+        "Adopt the stale chart-colors goal.",
+        "Write a checkpoint or ask a Save/Resume/lane question for ordinary continuation."
+      ],
+      "fixture": "handoff-native-continuation.json"
+    },
+    {
+      "id": "handoff-inline-recap-before-clear",
+      "skills": [
+        "codex-handoff",
+        "claude-handoff"
+      ],
+      "request": "clear 전에 정리해줘. 현재 작업은 README.md의 보고서 포맷터이고, 빈 보고서는 빈 문자열로 처리하기로 했어. 구현은 아직 안 했고 다음에는 테스트 기준을 정할 거야.",
+      "expected": [
+        "Give an inline recap of the current task, or clarify persistence only if genuinely necessary.",
+        "Do not read or write handoff artifacts merely because clear was mentioned."
+      ],
+      "forbidden": [
+        "Treat a recap request as authorization to persist a snapshot.",
+        "Read or import the old chart-colors snapshot."
+      ],
+      "fixture": "handoff-inline-recap-before-clear.json"
+    },
+    {
+      "id": "handoff-checkpoint-without-reset",
+      "skills": [
+        "codex-handoff",
+        "claude-handoff"
+      ],
+      "request": "현재 작업 상태를 handoff 체크포인트 파일로 저장해줘. README.md처럼 빈 보고서는 빈 문자열로 처리하기로 했고, 구현 전에 빈 입력과 일반 입력의 테스트 기준을 정하는 중이야. 저장한 뒤에도 이 대화는 계속 사용할 거야.",
+      "expected": [
+        "Persist a valid checkpoint using the canonical save helper and correct producing agent.",
+        "Verify and accurately report the actual latest/dated-backup result.",
+        "Stay in the current conversation; no reset or transfer is required."
+      ],
+      "forbidden": [
+        "Refuse a checkpoint solely because the user is not switching sessions.",
+        "Require clear, a fresh session, or recurring compaction-time saves.",
+        "Edit repo instructions or unrelated files."
+      ],
+      "fixture": "handoff-checkpoint-without-reset.json"
+    },
+    {
+      "id": "handoff-generic-save-is-not-checkpoint",
+      "skills": [
+        "codex-handoff",
+        "claude-handoff"
+      ],
+      "request": "src/formatter.py의 수정 내용을 저장해줘. handoff 파일이나 커밋을 요청하는 건 아니야.",
+      "expected": [
+        "Interpret the request as source-file work, not a handoff save.",
+        "Clarify the intended source edit if missing rather than inventing a checkpoint."
+      ],
+      "forbidden": [
+        "Run handoff helpers or inspect snapshot lanes."
+      ]
+    },
+    {
+      "id": "handoff-tooling-review-is-not-invocation",
+      "skills": [
+        "codex-handoff",
+        "claude-handoff"
+      ],
+      "request": "handoff 스킬의 자동 압축 처리 문구를 검토해줘.",
+      "expected": [
+        "Review the skill instructions as the task artifact, not as a Save/Resume request."
+      ],
+      "forbidden": [
+        "Create or load a work snapshot merely because the skill was named."
+      ]
     }
   ]
 }

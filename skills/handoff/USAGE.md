@@ -6,10 +6,13 @@ Prerequisite: install the matching skill from this repo, then restart/open a fre
 
 ## Mental Model
 
-Most common use: **same LLM, clean context**. Save before `/clear`, then resume in a fresh session of the same agent. This prevents long-chat/context pollution while preserving the useful working state. Cross-agent transfer is optional.
+Default: **keep ongoing work in its native conversation**. Let the runtime manage compaction and use native session resume when reopening the same conversation. File handoffs are optional artifacts, not required companions to compaction.
 
-- **Save Mode**: before `/clear`, context reset, periodic context cleanup, or agent switch. The canonical save helper produces an exclusive dated backup; an existing `latest.md` is updated only with its expected SHA-256 and an atomic exchange primitive.
-- **Resume Mode**: after `/clear`, in a fresh same-agent session, or in another compatible agent. The canonical selector validates `latest.md`, falls back to same-lane backups when needed, and can emit the already-validated snapshot with `--content` before repo verification; display paths are not machine paths.
+- **Save Mode**: requested persisted checkpoint or file-based transfer. The canonical helper produces an exclusive dated backup; an existing `latest.md` is updated only with its expected SHA-256 and an atomic exchange primitive. A checkpoint can be saved while continuing the same session.
+- **Resume Mode**: requested continuation from a saved snapshot/lane. The selector validates `latest.md`, falls back to same-lane backups when needed, and emits validated content with `--content` before repo verification; display paths are not machine paths.
+- **Neither**: automatic/manual compaction, native session resume, bare `계속해`, generic code saves, inline recaps, or discussion of handoff tooling. Do not inspect `.handoff/` or ask lane questions just because these occur.
+
+For Astra in Codex, this keeps file handoffs separate from native context management. It does not assume lossless compaction, equal behavior across runtimes, or a fixed context-window size. See the [Astra guide](https://developers.openai.com/api/docs/guides/latest-model) and [Codex compaction configuration](https://learn.chatgpt.com/docs/config-file/config-reference).
 
 Generated files live in the target project:
 
@@ -23,15 +26,15 @@ Generated files live in the target project:
 
 The installed handoff skills default to Korean for final user-facing Save/Resume reports. They still preserve code, commands, paths, schema labels, and exact errors in their original language. If you want another language for a specific run, say so explicitly.
 
-## Periodic Same-Agent Cleanup
+## Requested Same-Agent Transfer
 
-Use this every time the chat gets long, noisy, or likely to confuse the model.
+Use this only when you choose a file-based handoff to a fresh conversation. A long chat alone is not a reason to reset. To return to an existing Codex conversation, prefer native `codex resume` rather than importing an old snapshot.
 
 ### Codex → fresh Codex
 
 ```text
 use codex-handoff
-컨텍스트 오염 방지를 위해 현재 작업 상태를 handoff로 저장해줘.
+새 대화로 옮기기로 했어. 현재 작업 상태를 handoff 파일로 저장해줘.
 그 다음 새 Codex 세션에서 이어받을 수 있게 next actions 중심으로 정리해.
 ```
 
@@ -46,7 +49,7 @@ use codex-handoff
 
 ```text
 use claude-handoff
-컨텍스트 정리를 위해 handoff 저장해줘. /clear 후 같은 Claude Code에서 이어받을 수 있게 정리해.
+새 Claude Code 대화로 옮길 handoff 파일을 저장해줘. 내가 세션을 전환한 뒤 이어받을 수 있게 정리해.
 ```
 
 Then after `/clear` or in a fresh Claude Code session:
@@ -55,6 +58,20 @@ Then after `/clear` or in a fresh Claude Code session:
 use claude-handoff
 .handoff/latest.md 검증하고 이어받아. 스냅샷은 참고만 하고 실제 repo 상태를 우선해.
 ```
+
+## Checkpoint Without Reset
+
+```text
+현재 상태를 handoff 체크포인트 파일로 남겨줘. 이 대화는 계속 사용할 거야.
+```
+
+Save with the canonical writer, report the actual result, and stay in the current session. Do not prescribe `/clear`, a fresh session, or another checkpoint on the next compaction.
+
+```text
+자동 압축됐네. 계속 진행해.
+```
+
+This continues the actual task using available conversation context. Even if an old `.handoff/latest.md` exists, do not run handoff helpers or restore it. Likewise, `clear 전에 정리해줘` without file-save intent can be answered with an inline recap; it does not automatically authorize persistence.
 
 ## Codex: Save Before `/clear`
 
@@ -179,7 +196,7 @@ Codex example:
 
 ```text
 use codex-handoff
-이 repo의 CODEX.md에 handoff clear-session rule을 추가해줘.
+이 repo의 CODEX.md에 명시적으로 요청한 파일 handoff에만 적용할 규칙을 추가해줘.
 반드시 marker block 방식으로 idempotent하게 적용해.
 ```
 
@@ -187,11 +204,11 @@ Claude example:
 
 ```text
 use claude-handoff
-이 repo의 CLAUDE.md에 handoff clear-session rule을 추가해줘.
+이 repo의 CLAUDE.md에 명시적으로 요청한 파일 handoff에만 적용할 규칙을 추가해줘.
 반드시 marker block 방식으로 idempotent하게 적용해.
 ```
 
-The skill should use `scripts/apply_marker_block.py` and should not overwrite unrelated content.
+The skill should use `scripts/apply_marker_block.py` and should not overwrite unrelated content. The marker must not turn compaction, session startup, or a reset into automatic Save/Resume triggers.
 
 ## Manual Script Examples
 

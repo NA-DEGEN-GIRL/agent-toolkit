@@ -4,6 +4,12 @@ This file summarizes repository releases. Installable package folders remain foc
 
 ## Unreleased
 
+### Native context management and explicit handoffs
+
+- Narrowed handoff activation to requested file checkpoints, transfers, and snapshot-based resume; ordinary continuation and native compaction/session resume no longer imply snapshot I/O.
+- Removed periodic reset advice and unconditional Save/Resume marker rules, preserved implicit discovery for clear task requests, and stopped treating old snapshots as automatically newer than current conversation context.
+- Kept the shared snapshot I/O, CAS, validation, and redaction helpers unchanged.
+
 ### Review hardening
 
 - Corrected MCP session-start ownership, subprocess cancellation/timeout cleanup,

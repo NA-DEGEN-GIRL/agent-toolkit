@@ -1,20 +1,14 @@
 # Handoff Skill Family
 
-The handoff family stores compact repo-local snapshots so an agent can resume work after `/clear`, a fresh session, or an optional transfer to another compatible agent.
-
-Primary workflow: **same-agent context hygiene**.
+The handoff family stores compact repo-local work snapshots **when the user requests a persisted checkpoint, a fresh-session handoff, or transfer to another compatible agent**. It is not an automatic context-management layer.
 
 ```text
-Codex long session  -> codex-handoff Save  -> fresh Codex session  -> codex-handoff Resume
-Claude long session -> claude-handoff Save -> fresh Claude session -> claude-handoff Resume
+Ongoing work / native compaction / native session resume -> continue the current task
+Requested checkpoint -> Save -> keep working in the same session if desired
+Requested transfer   -> Save -> selected session/compatible agent -> requested Resume
 ```
 
-Cross-agent transfer is optional:
-
-```text
-Codex Save -> Claude Resume
-Claude Save -> Codex Resume
-```
+Do not save, load, discover lanes, or recommend a reset merely because a chat is long, compaction occurred, a session started, or `.handoff/` exists. Ordinary `continue` and inline summaries are not file-handoff requests. A validated old snapshot never automatically outranks current user clarifications or native compacted conversation context.
 
 Both variants also support optional **scoped lanes** (`.handoff/scopes/<scope>/`) so parallel agents can save/resume a specific task-group instead of one shared snapshot; omit a scope for the single default lane. See [`USAGE.md`](USAGE.md).
 

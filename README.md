@@ -16,13 +16,13 @@ This repository manages portable local-agent tooling in one place while keeping 
 | `shape-idea` | Codex + Claude | 모호한 만들기 아이디어를 질문·기술 fork 번역·Design Brief로 구체화 | "아이디어 구체화해줘" · "먼저 설계" |
 | `codex-init-gate` | Codex | 선택된 runner에 LLM-debuggable check-only 품질 게이트 구성 | "게이트 깔아줘" · "scaffold checks" |
 | `claude-init-gate` | Claude Code | 위와 동일 (Claude Code용) | "게이트 깔아줘" · "scaffold checks" |
-| `codex-handoff` | Codex | 세션 작업 스냅샷 저장/재개 (`.handoff/`) — `/clear` 전후 맥락 유지 | "handoff 저장해줘" · "이어받아" |
-| `claude-handoff` | Claude Code | 위와 동일 (Claude Code용) | "handoff 저장해줘" · "이어받아" |
+| `codex-handoff` | Codex | 요청한 체크포인트·작업 인수인계 저장/재개 (`.handoff/`) | "handoff 저장해줘" · "handoff에서 이어받아" |
+| `claude-handoff` | Claude Code | 위와 동일 (Claude Code용) | "handoff 저장해줘" · "handoff에서 이어받아" |
 | `design-repo-subagents` | Codex | repo 기반 explorer·worker·검토 subagent 설계/운영 | "이 작업 subagent로 나눠줘" · "비판 agent" |
 | `write-agents-md` | Codex | repo 사실 기반 `AGENTS.md` 작성·리뷰 | "AGENTS.md 만들어줘" |
 | `orient-repo` | Codex + Claude | 읽기전용 repo 파악 리포트 (stack·명령·구조) | "이 repo 파악해줘" |
 
-각 스킬은 `use <스킬이름>` 또는 위 트리거 문구로 부릅니다. `idea-shaping`은 raw voice or freeform thought를 seed 문장으로 정리한 뒤 계획 전 결정/이유를 Design Brief로 구체화하는 용도이고, `repo-bootstrap`은 LLM이 수정·디버깅하기 쉬운 품질 게이트 초기화가 주 용도이며, `handoff`는 같은 agent 내 맥락 위생이 주 용도입니다. `distill-ramble`, `shape-idea`, `orient-repo`는 Codex·Claude 공용입니다.
+각 스킬은 `use <스킬이름>` 또는 위 트리거 문구로 부릅니다. `idea-shaping`은 raw voice or freeform thought를 seed 문장으로 정리한 뒤 계획 전 결정/이유를 Design Brief로 구체화하는 용도이고, `repo-bootstrap`은 LLM이 수정·디버깅하기 쉬운 품질 게이트 초기화가 주 용도이며, `handoff`는 명시적으로 요청한 체크포인트·세션/에이전트 인계가 주 용도입니다. `distill-ramble`, `shape-idea`, `orient-repo`는 Codex·Claude 공용입니다.
 
 ## MCP servers at a glance
 
@@ -144,10 +144,10 @@ Primary workflow: inspect stack, command bodies, existing runner, and code-struc
 
 ### Handoff
 
-Primary workflow: **same-agent context hygiene**. Save before `/clear` or a fresh session, then resume in the same agent from `.handoff/latest.md` without carrying polluted chat context. Cross-agent handoff is optional.
+Primary workflow: **requested file-based checkpoints and handoffs**. Ordinary continuation, native compaction, and native session resume do not trigger file handoffs. Save/import a snapshot only when requested; a checkpoint does not require a reset. Cross-agent transfer requires compatible receiving tooling.
 
-- `codex-handoff`: Codex skill package for saving/resuming `.handoff/` snapshots, mainly Codex → fresh Codex session.
-- `claude-handoff`: Claude Code counterpart, mainly Claude → fresh Claude Code session.
+- `codex-handoff`: Codex skill package for saving/resuming `.handoff/` snapshots, for requested checkpoints or session/compatible-agent transfer.
+- `claude-handoff`: Claude Code counterpart, with the same requested-file boundary.
 
 Snapshot files live in the target project, never in this skill repository:
 

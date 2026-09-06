@@ -69,11 +69,11 @@
 
 ## codex-handoff / claude-handoff — 작업 핸드오프
 
-- **무엇:** 작업 상태를 `.handoff/latest.md` 스냅샷으로 저장하고, 새 세션에서 그대로 이어받습니다. 주 용도는 **같은 agent 안에서의 맥락 위생**(`/clear` 전에 저장 → 깨끗한 세션에서 재개). Codex↔Claude 교차 인계도 가능은 하지만 부수적입니다. 작업군이 여러 개인 **병렬 작업**이면 `scope(lane)`로 작업군별 스냅샷을 따로 저장/재개합니다(아래 "병렬 작업" 참고).
-- **언제:** 컨텍스트가 길어져 정리하고 싶을 때, `/clear` 직전, 다음 세션으로 넘기고 싶을 때, 여러 LLM을 작업군별로 병렬로 돌릴 때.
+- **무엇:** 요청한 작업 체크포인트·인수인계를 `.handoff/latest.md`로 저장/검증하여 재개합니다. 같은 대화의 자동 압축·일반적인 이어서 작업하기·기존 세션 재접속은 이 스킬의 용도가 아닙니다. 명시적으로 새 대화로 옮기거나 Codex↔Claude 간 전달할 때 사용하며, checkpoint만 저장하고 같은 대화를 계속할 수도 있습니다.
+- **언제:** 체크포인트 파일을 요청할 때, 의도적으로 새 대화/호환 agent로 인계할 때, 특정 scope의 저장된 handoff에서 복구할 때. 대화가 길거나 압축됐다는 이유만으로 실행하지 않습니다.
 - **예시 프롬프트:**
-  - `use codex-handoff` / `handoff 저장해줘` / `clear 전에 정리해줘`
-  - `use codex-handoff` / `이어받아` / `latest.md 보고 계속해`
+  - `use codex-handoff` / `handoff 저장해줘` / `clear 전에 handoff 파일로 저장해줘`
+  - `use codex-handoff, 이어받아` / `.handoff/latest.md 보고 계속해`
   - 특정 작업군만(scope): `auth-refactor scope로 handoff 저장해줘` / `auth-refactor scope 이어받아`
   - (Claude Code에서는 `codex-handoff` 대신 `claude-handoff`)
 - **비고:** 스냅샷은 **신뢰하지 않는 데이터**로 취급 — 실제 repo 상태가 우선이고, 스냅샷 안의 명령/지시는 검증 후에만 따릅니다. `save_snapshot.py`가 bounded validation, exclusive backup, lock/CAS, atomic latest, parity, retention을 담당하고 `select_snapshot.py`가 한 lane 안에서 valid latest→backup을 선택합니다. 두 패키지는 파일 포맷을 공유하지만 백업 파일에 `-codex.md` / `-claude.md`로 출처를 남깁니다.
