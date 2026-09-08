@@ -15,10 +15,11 @@ Current included families:
 - `skills/subagents/design-repo-subagents` — Codex-specific subagent planning/operation package.
 - `skills/repo-instructions/write-agents-md` — Codex-specific AGENTS.md drafting/review package.
 - `skills/repo-orientation/orient-repo` — agent-neutral, read-only repo orientation package (installed to both `~/.codex` and `~/.claude`).
+- `skills/game-visual-polish/game-visual-polish` — Codex package for genre-sensitive, scope-bounded visual improvement of an existing game, scene, UI, or selected assets.
 
 The MCP catalog registers `mcp-servers/llm-router-mcp`, imported with its standalone Git history. New source changes belong in this monorepo. The previous standalone repository and existing client paths remain temporary rollback state until a separately reviewed client cutover and smoke test are complete.
 
-The user asked to keep these local, agent-specific where needed, and not patch installed global skills directly. The current version is `0.1.11`. For idea-shaping, the primary intended use is pre-plan or midstream clarification: first optionally distill raw voice/freeform thought into seed sentences, then decide what/why, translate consequential technical forks, check new feature ideas against existing key decisions, and draft an accepted Design Brief without coding, scaffolding, running repo commands, or editing AGENTS.md. For repo-bootstrap, the primary intended use is gate-first initialization for LLM-debuggable codebases: a reviewed check-only canonical runner (`make check` only when Make is selected), enforceable structure checks where tooling supports them, plus optional pre-commit/CI after approval; it is not general `git init`. For handoff, the intended use is requested persisted checkpoints or file-based session/agent transfer, not periodic context cleanup. Native compaction, native session resume, and ordinary continuation must not trigger snapshot I/O. Keep current user clarifications over stale snapshot claims; saving a checkpoint does not require clearing the session. For subagents, the primary intended use is repo-grounded Codex delegation planning and operation under the active runtime's delegation policy. For repo-instructions, the primary intended use is fact-grounded `AGENTS.md` drafting and review. For repo-orientation, the primary intended use is a read-only descriptive orientation report for any repo.
+The user asked to keep these local, agent-specific where needed, and not patch installed global skills directly. The current version is `0.1.11`. For idea-shaping, the primary intended use is pre-plan or midstream clarification: first optionally distill raw voice/freeform thought into seed sentences, then decide what/why, translate consequential technical forks, check new feature ideas against existing key decisions, and draft an accepted Design Brief without coding, scaffolding, running repo commands, or editing AGENTS.md. For repo-bootstrap, the primary intended use is gate-first initialization for LLM-debuggable codebases: a reviewed check-only canonical runner (`make check` only when Make is selected), enforceable structure checks where tooling supports them, plus optional pre-commit/CI after approval; it is not general `git init`. For handoff, the intended use is requested persisted checkpoints or file-based session/agent transfer, not periodic context cleanup. Native compaction, native session resume, and ordinary continuation must not trigger snapshot I/O. Keep current user clarifications over stale snapshot claims; saving a checkpoint does not require clearing the session. For subagents, the primary intended use is repo-grounded Codex delegation planning and operation under the active runtime's delegation policy. For repo-instructions, the primary intended use is fact-grounded `AGENTS.md` drafting and review. For repo-orientation, the primary intended use is a read-only descriptive orientation report for any repo. For game-visual-polish, the primary intended use is visual art-direction and asset/UI improvement in an existing playable game while preserving explicit scope and gameplay contracts.
 
 ## Read Order
 
@@ -31,12 +32,13 @@ The user asked to keep these local, agent-specific where needed, and not patch i
 7. `skills/subagents/USAGE.md` — subagent planning/spawn examples.
 8. `skills/repo-instructions/USAGE.md` — AGENTS.md drafting/review examples.
 9. `skills/repo-orientation/USAGE.md` — read-only repo orientation examples.
-10. `README.md` — human/LLM overview, installation, routing caveats.
-11. `AGENTS.md` — concise repo-local rules for coding agents.
-12. Package `SKILL.md` files under `skills/<family>/<skill-name>/`.
-13. Package runtime scripts/references under `skills/<family>/<skill-name>/`.
-14. Root `scripts/`, family `skills/<family>/scripts/`, and `Makefile` — repo validation/sync surface.
-15. `evals/scenarios.json` — high-risk forward-test prompts; do not leak expected answers into fresh-agent test prompts.
+10. `skills/game-visual-polish/USAGE.md` — existing-game visual, item, and UI polish examples.
+11. `README.md` — human/LLM overview, installation, routing caveats.
+12. `AGENTS.md` — concise repo-local rules for coding agents.
+13. Package `SKILL.md` files under `skills/<family>/<skill-name>/`.
+14. Package runtime scripts/references under `skills/<family>/<skill-name>/`.
+15. Root `scripts/`, family `skills/<family>/scripts/`, and `Makefile` — repo validation/sync surface.
+16. `evals/scenarios.json` — high-risk forward-test prompts; do not leak expected answers into fresh-agent test prompts.
 
 ## Layout Rules
 
@@ -117,6 +119,16 @@ The handoff package narrows the gap between prose promises and code:
 - It references sibling skills **generically** (capability, not package name) and reads `.handoff/latest.md` as an artifact — never hardcoding `codex-handoff`/`claude-handoff`/`handoff`.
 - It is strictly read-only, reports decision docs/Design Briefs such as `docs/design-brief.md` and `docs/designs/*.md`, does not merge default/scoped handoff histories, and labels command evidence as `documented`, `statically confirmed`, or `executed` (orientation itself never executes repo commands).
 - Redact remote credentials/internal URLs, absolute home usernames, sensitive changed paths, and snapshot-summary values.
+
+## Game Visual Polish Notes
+
+- `game-visual-polish` is currently Codex-targeted and is intended for existing games, not greenfield game generation.
+- It infers `game`, `scene`, `asset`, `ui`, or `design-only` scope from the request and keeps explicit exclusions authoritative.
+- Gameplay rules, balance, saves, networking, hitboxes/collision, input semantics, camera framing, level topology, and attack timing are protected by default unless the user explicitly puts them in scope.
+- A local asset request must inspect shared materials, shaders, atlases, selectors, and theme tokens before changing them; item-only work never implicitly authorizes global lighting or camera changes.
+- Photorealism is not a default target. The skill chooses a genre/project-appropriate visual grammar and evaluates actual gameplay-size readability and coherence.
+- Image generation, Blender, live capture, performance measurement, web references, and independent subagents are capability-dependent. Missing runtime evidence must remain UNKNOWN/unverified rather than being fabricated.
+- The package is an unofficial MIT-licensed adaptation of `achimala/dream-loop`; provenance and the upstream copyright notice are shipped with the package.
 
 ## Still True Limitations
 
