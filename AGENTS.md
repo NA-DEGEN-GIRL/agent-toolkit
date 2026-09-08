@@ -13,9 +13,10 @@ This repo manages portable local-agent tooling. Skills for Codex, Claude Code, a
 - For subagent planning/operation examples, read `skills/subagents/USAGE.md`.
 - For AGENTS.md drafting/review examples, read `skills/repo-instructions/USAGE.md`.
 - For read-only repo orientation examples, read `skills/repo-orientation/USAGE.md`.
+- For existing-game visual polish examples, read `skills/game-visual-polish/USAGE.md`.
 - For project overview and safety boundaries, read `README.md`.
 - For maintenance context, read `LLM_CONTEXT.md`.
-- Current skill entrypoints are `skills/idea-shaping/distill-ramble/SKILL.md`, `skills/idea-shaping/shape-idea/SKILL.md`, `skills/repo-bootstrap/codex-init-gate/SKILL.md`, `skills/repo-bootstrap/claude-init-gate/SKILL.md`, `skills/handoff/codex-handoff/SKILL.md`, `skills/handoff/claude-handoff/SKILL.md`, `skills/subagents/design-repo-subagents/SKILL.md`, `skills/repo-instructions/write-agents-md/SKILL.md`, and `skills/repo-orientation/orient-repo/SKILL.md`.
+- Current skill entrypoints are `skills/idea-shaping/distill-ramble/SKILL.md`, `skills/idea-shaping/shape-idea/SKILL.md`, `skills/repo-bootstrap/codex-init-gate/SKILL.md`, `skills/repo-bootstrap/claude-init-gate/SKILL.md`, `skills/handoff/codex-handoff/SKILL.md`, `skills/handoff/claude-handoff/SKILL.md`, `skills/subagents/design-repo-subagents/SKILL.md`, `skills/repo-instructions/write-agents-md/SKILL.md`, `skills/repo-orientation/orient-repo/SKILL.md`, and `skills/game-visual-polish/game-visual-polish/SKILL.md`.
 - Current MCP entrypoint: `mcp-servers/llm-router-mcp/bin/llm-router-mcp.js`.
 
 ## Validation
