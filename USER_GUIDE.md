@@ -21,6 +21,7 @@
 | `design-repo-subagents` | Codex | repo 기반 subagent 설계/운영 |
 | `write-agents-md` | Codex | `AGENTS.md` 작성·리뷰 |
 | `orient-repo` | Codex + Claude | 읽기전용 repo 파악 리포트 |
+| `game-visual-polish` | Codex | 기존 게임의 그래픽·분위기·UI·특정 아이템 디자인을 범위 안에서 개선 |
 
 `distill-ramble`, `shape-idea`, `orient-repo`는 Codex·Claude 공용이고 나머지는 위 표의 agent용입니다.
 
@@ -136,11 +137,23 @@ scope 없이 그냥 "이어받아"라고 하면, `list_lanes.py`가 latest가 �
 - **비고:** handoff가 있으면 symlink/path escape와 1 MiB 상한을 검사하고, 여러 default/scoped lane을 합치지 않은 채 관련 lane 하나만 선택해 **이전 세션 맥락**을 신뢰하지 않는 힌트로 반영합니다. 명령은 `documented`, `statically confirmed`, `executed`를 구분하며 orientation 자체는 실행하지 않습니다. remote/home/changed path와 snapshot 요약도 redaction합니다.
 - **자세히:** [`skills/repo-orientation/USAGE.md`](skills/repo-orientation/USAGE.md)
 
+## game-visual-polish — 기존 게임 그래픽/아이템/UI 개선 (Codex)
+
+- **무엇:** 이미 개발 중인 게임을 실제 프로젝트와 플레이 화면 기준으로 보고, 장르·세계관·플레이 방식에 맞는 아트 방향을 골라 **요청한 범위만** 개선합니다. 전체 게임, 특정 장면, 특정 에셋/아이템, UI, design-only를 구분합니다.
+- **언제:** "그래픽이 별로다", "이 게임에 맞는 분위기를 찾아 개선해", "검/방패만 다시 디자인해", "스킬트리 UI만 개선해" 같은 요청.
+- **예시 프롬프트:**
+  - `use game-visual-polish` / `게임 그래픽이 별로야. 장르에 맞는 분위기를 찾아 실제 프로젝트에 반영해. 게임 로직은 유지해.`
+  - `use game-visual-polish` / `검과 방패 디자인만 개선해. 배경, 카메라, 조명, 능력치와 판정은 건드리지 마.`
+  - `use game-visual-polish` / `스킬트리 UI만 개선해. 기능과 정보 구조는 유지해.`
+  - `use game-visual-polish` / `문제 진단과 아트 방향만 제안하고 코드는 수정하지 마.`
+- **비고:** 실사 AAA를 기본 정답으로 보지 않고 픽셀·카툰·로우폴리·플랫 스타일도 게임에 맞으면 선택합니다. 로컬 에셋 수정 시 공유 material/shader/atlas/theme이 다른 consumer까지 바꾸지 않는지 먼저 확인합니다. 이미지 생성·Blender·runtime capture·subagent는 호스트가 실제 제공할 때만 사용하며, 실행/캡처/성능 검증을 못 했으면 완료 검증이라고 주장하지 않습니다.
+- **자세히:** [`skills/game-visual-polish/USAGE.md`](skills/game-visual-polish/USAGE.md)
+
 ---
 
 ## 설치
 
-[`INSTALL.md`](INSTALL.md)의 dry-run-first `scripts/install_skill.py`로 대상 agent의 스킬 홈에 복사(권장) 또는 심볼릭 링크합니다. `distill-ramble`, `shape-idea`, `orient-repo`는 같은 소스를 Codex·Claude 양쪽에 설치할 수 있습니다. 설치 후 `doctor`로 version/duplicate를 확인하고 agent를 재시작하거나 새 세션을 엽니다.
+[`INSTALL.md`](INSTALL.md)의 dry-run-first `scripts/install_skill.py`로 대상 agent의 스킬 홈에 복사(권장) 또는 심볼릭 링크합니다. `distill-ramble`, `shape-idea`, `orient-repo`는 같은 소스를 Codex·Claude 양쪽에 설치할 수 있고, `game-visual-polish`는 현재 Codex 대상으로 등록되어 있습니다. 설치 후 `doctor`로 version/duplicate를 확인하고 agent를 재시작하거나 새 세션을 엽니다.
 
 ## 공통 안전 메모
 
