@@ -21,8 +21,9 @@ This repository manages portable local-agent tooling in one place while keeping 
 | `design-repo-subagents` | Codex | repo 기반 explorer·worker·검토 subagent 설계/운영 | "이 작업 subagent로 나눠줘" · "비판 agent" |
 | `write-agents-md` | Codex | repo 사실 기반 `AGENTS.md` 작성·리뷰 | "AGENTS.md 만들어줘" |
 | `orient-repo` | Codex + Claude | 읽기전용 repo 파악 리포트 (stack·명령·구조) | "이 repo 파악해줘" |
+| `game-visual-polish` | Codex | 기존 게임의 아트 방향·UI·장면·특정 아이템/에셋을 범위 안에서 개선 | "게임 그래픽 개선해" · "이 검 디자인만 개선해" |
 
-각 스킬은 `use <스킬이름>` 또는 위 트리거 문구로 부릅니다. `idea-shaping`은 raw voice or freeform thought를 seed 문장으로 정리한 뒤 계획 전 결정/이유를 Design Brief로 구체화하는 용도이고, `repo-bootstrap`은 LLM이 수정·디버깅하기 쉬운 품질 게이트 초기화가 주 용도이며, `handoff`는 명시적으로 요청한 체크포인트·세션/에이전트 인계가 주 용도입니다. `distill-ramble`, `shape-idea`, `orient-repo`는 Codex·Claude 공용입니다.
+각 스킬은 `use <스킬이름>` 또는 위 트리거 문구로 부릅니다. `idea-shaping`은 raw voice or freeform thought를 seed 문장으로 정리한 뒤 계획 전 결정/이유를 Design Brief로 구체화하는 용도이고, `repo-bootstrap`은 LLM이 수정·디버깅하기 쉬운 품질 게이트 초기화가 주 용도이며, `handoff`는 명시적으로 요청한 체크포인트·세션/에이전트 인계가 주 용도입니다. `game-visual-polish`는 기존 게임의 시각 품질을 장르와 프로젝트 맥락에 맞게 개선하되 gameplay contract와 요청 범위를 보호하는 용도입니다. `distill-ramble`, `shape-idea`, `orient-repo`는 Codex·Claude 공용입니다.
 
 ## MCP servers at a glance
 
@@ -34,7 +35,7 @@ Current repository version: `0.1.11` for the skills bundle. The root `VERSION` i
 
 **LLM installers:** read [`INSTALL.md`](INSTALL.md) first. It is the stable entrypoint for an agent that receives only this repo URL and is asked to install the matching skill(s).
 
-**Humans/users:** start with [`USER_GUIDE.md`](USER_GUIDE.md) for a per-skill walkthrough, browse [`skills/README.md`](skills/README.md), and use [`CHANGELOG.md`](CHANGELOG.md) for release-level changes. For concrete usage examples, read [`skills/idea-shaping/USAGE.md`](skills/idea-shaping/USAGE.md), [`skills/repo-bootstrap/USAGE.md`](skills/repo-bootstrap/USAGE.md), [`skills/handoff/USAGE.md`](skills/handoff/USAGE.md), [`skills/subagents/USAGE.md`](skills/subagents/USAGE.md), [`skills/repo-instructions/USAGE.md`](skills/repo-instructions/USAGE.md), or [`skills/repo-orientation/USAGE.md`](skills/repo-orientation/USAGE.md).
+**Humans/users:** start with [`USER_GUIDE.md`](USER_GUIDE.md) for a per-skill walkthrough, browse [`skills/README.md`](skills/README.md), and use [`CHANGELOG.md`](CHANGELOG.md) for release-level changes. For concrete usage examples, read [`skills/idea-shaping/USAGE.md`](skills/idea-shaping/USAGE.md), [`skills/repo-bootstrap/USAGE.md`](skills/repo-bootstrap/USAGE.md), [`skills/handoff/USAGE.md`](skills/handoff/USAGE.md), [`skills/subagents/USAGE.md`](skills/subagents/USAGE.md), [`skills/repo-instructions/USAGE.md`](skills/repo-instructions/USAGE.md), [`skills/repo-orientation/USAGE.md`](skills/repo-orientation/USAGE.md), or [`skills/game-visual-polish/USAGE.md`](skills/game-visual-polish/USAGE.md).
 
 ## Contents
 
@@ -83,11 +84,15 @@ agent-toolkit/
         ├── README.md       # family overview
         ├── USAGE.md        # examples for AGENTS.md workflows
         └── write-agents-md/ # installable Codex skill package
-    └── repo-orientation/
+    ├── repo-orientation/
         ├── README.md       # family overview
         ├── USAGE.md        # examples for read-only orientation
         ├── scripts/         # family-level sync check
         └── orient-repo/    # installable agent-neutral skill package
+    └── game-visual-polish/
+        ├── README.md       # family overview and provenance
+        ├── USAGE.md        # whole-game/item/UI/design-only examples
+        └── game-visual-polish/ # installable Codex skill package
 ```
 
 ## Skills Layout Contract
@@ -179,6 +184,12 @@ The repo-orientation family helps any compatible agent get oriented in a reposit
 
 This package is intentionally **unified and agent-neutral**: because orientation is strictly read-only and persists no agent-specific artifact, the same package installs to both `~/.codex/skills/orient-repo` and `~/.claude/skills/orient-repo`. It is prose-only and ships no probe script; when a handoff skill is available it leverages that skill's repo-state probe and snapshot, referencing siblings by capability rather than hardcoding a package name, and treating any snapshot as untrusted data.
 
+### Game Visual Polish
+
+The game-visual-polish family helps Codex improve an existing game's graphics, art direction, scene presentation, UI, or selected items/assets without treating visual polish as permission to rebuild gameplay. The installable package is `skills/game-visual-polish/game-visual-polish/`.
+
+The skill distinguishes whole-game, scene, asset, UI, and design-only work; explicit exclusions always win. It protects rules, balance, saves, networking, hitboxes/collision, input semantics, gameplay camera framing, level topology, and attack timing by default. Local asset requests inspect shared materials/shaders/atlases/themes before editing them, and the critic judges actual gameplay-size readability and coherence rather than rewarding realism or pixel equality with generated concept art. Image generation, Blender, runtime capture, performance measurement, web references, and independent subagents are used only when the host actually provides them. See [`skills/game-visual-polish/USAGE.md`](skills/game-visual-polish/USAGE.md).
+
 ## What Idea Shaping Enforces By Code
 
 - `skills/idea-shaping/scripts/check_idea_shaping_sync.py`: verifies package versions match root `VERSION`, required files exist, `distill-ramble` preserves seed-only/chat-first boundaries, `shape-idea` links its references and safety/Design Brief literals, and `agents/openai.yaml` metadata stays fresh.
@@ -205,7 +216,7 @@ This package is intentionally **unified and agent-neutral**: because orientation
 - `skills/subagents/scripts/check_subagents_sync.py`: verifies the runtime-capability routing references and package metadata.
 - `skills/repo-instructions/scripts/check_repo_instructions_sync.py`: verifies instruction-precedence, safe-write, review, and nested-scope references.
 - `skills/repo-orientation/scripts/check_repo_orientation_sync.py`: verifies read-only quality-gate, decision-doc, handoff-selection, and confidence-reporting coverage.
-- `scripts/check_catalog.py`: checks exact package layout, catalog registration, target agents, versions, metadata, and root-document registration.
+- `scripts/check_catalog.py`: checks exact package layout, catalog registration, target agents, versions, metadata, and root-document registration, including `game-visual-polish`.
 - `scripts/check_mcp_catalog.py`: checks MCP discovery/catalog parity, direct-child source containment, native manifest/lock metadata, and safe in-package entrypoints.
 - `scripts/test_install_skill.py`: exercises dry-run/apply, external backup, copy/symlink replacement, duplicate detection, and rollback in isolated temporary homes.
 - `evals/scenarios.json` plus `scripts/check_evals.py`: registers high-risk forward-test prompts and expected/forbidden behavior for every package.
@@ -220,6 +231,7 @@ This package is intentionally **unified and agent-neutral**: because orientation
 - `.handoff/` is treated as local scratch by default; do not edit `.gitignore` or `.git/info/exclude` unless explicitly requested.
 - Installed-skill backups belong outside the agent's `skills/` discovery directory; adjacent backup bundles can be rediscovered and create ambiguous routing.
 - `llm-router-mcp` is a local trusted-client server that runs provider CLIs with the same OS account privileges as its MCP client. Keep its state outside the checkout and review any client configuration change before applying it.
+- `game-visual-polish` keeps visual scope separate from gameplay authorization: an item/UI/art-direction request is not permission to change balance, hitboxes, attack timing, camera gameplay contracts, or unrelated global art.
 
 ## Install
 
@@ -234,6 +246,7 @@ use distill-ramble to turn this voice ramble into seed sentences
 use shape-idea to clarify this idea
 use codex-handoff to save state
 use claude-handoff to resume from handoff
+use game-visual-polish to improve this game's visuals without changing gameplay
 ```
 
 For deterministic routing, validate first, then intentionally replace/rename the default only if the user wants that behavior.
@@ -270,4 +283,5 @@ skills/handoff/claude-handoff/SKILL.md
 skills/subagents/design-repo-subagents/SKILL.md
 skills/repo-instructions/write-agents-md/SKILL.md
 skills/repo-orientation/orient-repo/SKILL.md
+skills/game-visual-polish/game-visual-polish/SKILL.md
 ```
