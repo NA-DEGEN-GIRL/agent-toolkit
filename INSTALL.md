@@ -19,6 +19,7 @@ Repository validation and installer scripts require Python 3.10 or newer. The au
 | subagents | Codex | `design-repo-subagents` | `skills/subagents/design-repo-subagents/` | `${CODEX_HOME:-$HOME/.codex}/skills/design-repo-subagents` |
 | repo-instructions | Codex | `write-agents-md` | `skills/repo-instructions/write-agents-md/` | `${CODEX_HOME:-$HOME/.codex}/skills/write-agents-md` |
 | repo-orientation | Codex + Claude Code | `orient-repo` | `skills/repo-orientation/orient-repo/` | `<agent-home>/skills/orient-repo` |
+| game-visual-polish | Codex | `game-visual-polish` | `skills/game-visual-polish/game-visual-polish/` | `${CODEX_HOME:-$HOME/.codex}/skills/game-visual-polish` |
 
 For the shared packages, `<agent-home>` is `${CODEX_HOME:-$HOME/.codex}` for Codex and `$HOME/.claude` for Claude Code.
 
@@ -71,6 +72,7 @@ Typical selections:
 - Codex subagent planning/operation: `design-repo-subagents`
 - Codex AGENTS.md drafting/review: `write-agents-md`
 - Read-only repository tour: `orient-repo`
+- Existing-game visual/art-direction polish or scoped item/UI redesign: `game-visual-polish`
 
 ## Canonical Installer
 
@@ -88,6 +90,15 @@ Apply it after reviewing the source, destination, validation result, and backup 
 python3 scripts/install_skill.py install \
   --agent codex \
   --skill orient-repo \
+  --apply
+```
+
+Game visual polish example:
+
+```bash
+python3 scripts/install_skill.py install \
+  --agent codex \
+  --skill game-visual-polish \
   --apply
 ```
 
@@ -215,6 +226,7 @@ use claude-handoff
 use design-repo-subagents
 use write-agents-md
 use orient-repo
+use game-visual-polish
 ```
 
 If similarly named built-in or legacy skills remain, routing is resolver-defined. Run `doctor`, remove or relocate duplicate discoverable copies only with explicit approval, then restart the agent.
