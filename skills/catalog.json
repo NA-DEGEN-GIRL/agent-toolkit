@@ -54,6 +54,12 @@
       "family": "repo-orientation",
       "source": "skills/repo-orientation/orient-repo",
       "targets": ["codex", "claude"]
+    },
+    {
+      "name": "game-visual-polish",
+      "family": "game-visual-polish",
+      "source": "skills/game-visual-polish/game-visual-polish",
+      "targets": ["codex"]
     }
   ]
 }
