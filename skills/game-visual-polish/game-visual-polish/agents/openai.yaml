@@ -1,0 +1,5 @@
+# Skill-creator UI metadata convention. This filename is not an OpenAI-only claim.
+interface:
+  display_name: "Game Visual Polish"
+  short_description: "Improve existing game visuals and scoped assets"
+  default_prompt: "Use $game-visual-polish to improve the requested visuals in this existing game while preserving gameplay and the requested scope."
