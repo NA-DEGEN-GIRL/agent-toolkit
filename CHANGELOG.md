@@ -4,6 +4,12 @@ This file summarizes repository releases. Installable package folders remain foc
 
 ## Unreleased
 
+### Game visual polish
+
+- Added the Codex-targeted `game-visual-polish` skill for improving an existing game's art direction, scenes, UI, or selected items/assets while preserving gameplay contracts and explicit scope.
+- Adapted the visual-target → implementation → live-capture → critique loop from the MIT-licensed `achimala/dream-loop`, removing the default AAA-realism/pixel-match bias in favor of genre-sensitive direction and gameplay-size review.
+- Added package provenance/license, family docs, catalog/install/user-guide registration, and a scoped-asset behavior eval.
+
 ### Native context management and explicit handoffs
 
 - Narrowed handoff activation to requested file checkpoints, transfers, and snapshot-based resume; ordinary continuation and native compaction/session resume no longer imply snapshot I/O.
