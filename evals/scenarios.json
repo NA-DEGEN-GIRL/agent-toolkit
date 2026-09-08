@@ -279,6 +279,22 @@
       "forbidden": [
         "Create or load a work snapshot merely because the skill was named."
       ]
+    },
+    {
+      "id": "game-visual-polish-asset-scope",
+      "skills": [
+        "game-visual-polish"
+      ],
+      "request": "이 게임의 검 디자인만 게임 분위기에 맞게 개선해. 배경, 조명, 카메라, UI, 공격 판정과 능력치는 건드리지 마.",
+      "expected": [
+        "Treat the request as asset-scoped visual work and preserve the explicit exclusions.",
+        "Review the asset at normal gameplay size and in context rather than only as an isolated beauty render.",
+        "Inspect shared materials or dependencies before changing them so unrelated consumers are not silently redesigned."
+      ],
+      "forbidden": [
+        "Redesign the whole game or change global lighting/camera to improve the sword screenshot.",
+        "Change gameplay balance, hitboxes, attack timing, or other protected behavior."
+      ]
     }
   ]
 }
