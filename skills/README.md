@@ -12,6 +12,7 @@ This directory contains installable skill packages grouped by skill family. `cat
 | `subagents` | Design and operate repo-specific Codex subagent delegation plans | `design-repo-subagents` | `0.1.11` | [`subagents/README.md`](subagents/README.md), [`subagents/USAGE.md`](subagents/USAGE.md) |
 | `repo-instructions` | Draft/review repo-local AGENTS.md instructions from repo facts | `write-agents-md` | `0.1.11` | [`repo-instructions/README.md`](repo-instructions/README.md), [`repo-instructions/USAGE.md`](repo-instructions/USAGE.md) |
 | `repo-orientation` | Produce a read-only orientation report including quality gates, decision docs, and selected handoff context | `orient-repo` | `0.1.11` | [`repo-orientation/README.md`](repo-orientation/README.md), [`repo-orientation/USAGE.md`](repo-orientation/USAGE.md) |
+| `game-visual-polish` | Improve an existing game's art direction, UI, scenes, or selected assets while preserving gameplay and scope | `game-visual-polish` | `0.1.11` | [`game-visual-polish/README.md`](game-visual-polish/README.md), [`game-visual-polish/USAGE.md`](game-visual-polish/USAGE.md) |
 
 ## Layout Convention
 
